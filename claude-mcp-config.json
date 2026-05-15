@@ -1,0 +1,16 @@
+{
+  "$schema": "Example configuration for Claude Code MCP integration",
+  "mcpServers": {
+    "kambo": {
+      "command": "python",
+      "args": ["-m", "kambo.server"],
+      "cwd": "C:\\Users\\Usuario\\war\\vaults\\Pentest\\kambo",
+      "env": {
+        "KAMBO_CONTAINER_NAME": "kambo-kali",
+        "KAMBO_OUTPUT_DIR": "./output",
+        "KAMBO_WORDLISTS_DIR": "./wordlists",
+        "KAMBO_DEFAULT_CONTEXT": "pentest"
+      }
+    }
+  }
+}

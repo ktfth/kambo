@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "mcp__kambo__recon_dns",
+      "mcp__kambo__recon_subdomains",
+      "mcp__kambo__recon_ports_fast",
+      "mcp__kambo__recon_tech_stack",
+      "mcp__kambo__recon_waf",
+      "mcp__kambo__recon_certs",
+      "mcp__kambo__recon_asn"
+    ]
+  }
+}

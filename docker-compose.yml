@@ -1,0 +1,15 @@
+services:
+  kali:
+    build: ./kali
+    container_name: kambo-kali
+    volumes:
+      - ./output:/output
+      - ./kali/scripts:/scripts
+      - ./wordlists:/wordlists
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    command: ["sleep infinity"]
