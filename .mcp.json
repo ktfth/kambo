@@ -3,7 +3,7 @@
     "kambo": {
       "command": "python",
       "args": ["-W", "ignore::DeprecationWarning", "-m", "kambo.server"],
-      "cwd": "C:\\Users\\Usuario\\war\\vaults\\Pentest\\kambo",
+      "cwd": "C:\\Users\\Usuario\\war\\kambo",
       "env": {
         "PYTHONWARNINGS": "ignore",
         "KAMBO_CONTAINER_NAME": "kambo-kali",
