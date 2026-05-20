@@ -16,6 +16,7 @@ CREATE TABLE IF NOT EXISTS findings (
     id TEXT PRIMARY KEY,
     title TEXT NOT NULL,
     severity TEXT NOT NULL,
+    confidence TEXT NOT NULL DEFAULT 'tentative',
     cvss REAL,
     cvss_vector TEXT,
     phase TEXT NOT NULL,
@@ -23,6 +24,7 @@ CREATE TABLE IF NOT EXISTS findings (
     description TEXT NOT NULL,
     reproduction_steps TEXT DEFAULT '[]',
     evidence TEXT DEFAULT '{}',
+    evidence_chain TEXT DEFAULT '{}',
     impact TEXT DEFAULT '',
     remediation TEXT DEFAULT '',
     references_json TEXT DEFAULT '[]',
@@ -100,13 +102,14 @@ class Database:
         assert self._db is not None
         await self._db.execute(
             """INSERT OR REPLACE INTO findings
-               (id, title, severity, cvss, cvss_vector, phase, target, description,
-                reproduction_steps, evidence, impact, remediation, references_json, tools_used, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+               (id, title, severity, confidence, cvss, cvss_vector, phase, target, description,
+                reproduction_steps, evidence, evidence_chain, impact, remediation, references_json, tools_used, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 finding.id,
                 finding.title,
                 finding.severity.value,
+                finding.confidence.value,
                 finding.cvss,
                 finding.cvss_vector,
                 finding.phase.value,
@@ -114,6 +117,7 @@ class Database:
                 finding.description,
                 json.dumps(finding.reproduction_steps),
                 json.dumps(finding.evidence),
+                json.dumps(finding.evidence_chain.model_dump(mode="json")),
                 finding.impact,
                 finding.remediation,
                 json.dumps(finding.references),

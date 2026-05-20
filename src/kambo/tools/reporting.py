@@ -1,4 +1,4 @@
-"""Phase 6: Reporting tools."""
+"""Phase 6: Reporting tools — with confidence levels and metrics."""
 
 from __future__ import annotations
 
@@ -6,7 +6,8 @@ import json
 from datetime import datetime, timezone
 
 from kambo.database import get_database
-from kambo.models import Finding, Phase, Severity
+from kambo.metrics import get_metrics
+from kambo.models import Confidence, EvidenceChain, Finding, Phase, Severity
 
 
 async def report_finding(
@@ -14,6 +15,7 @@ async def report_finding(
     severity: str,
     target: str,
     description: str,
+    confidence: str = "tentative",
     reproduction_steps: list[str] | None = None,
     impact: str = "",
     remediation: str = "",
@@ -22,14 +24,16 @@ async def report_finding(
     references: list[str] | None = None,
     tools_used: list[str] | None = None,
     evidence: dict | None = None,
+    evidence_signals: list[dict] | None = None,
 ) -> dict:
-    """Create and store a security finding.
+    """Create and store a security finding with confidence level.
 
     Args:
         title: Finding title (e.g., "SQL Injection in /api/users")
         severity: critical, high, medium, low, info
         target: Affected target/endpoint
         description: Technical description of the vulnerability
+        confidence: confirmed, firm, tentative — evidence-based confidence
         reproduction_steps: Steps to reproduce
         impact: Business/technical impact statement
         remediation: Fix recommendation
@@ -37,18 +41,32 @@ async def report_finding(
         cvss_vector: CVSS vector string
         references: CWE, OWASP references
         tools_used: Tools used to discover
-        evidence: Request/response evidence
+        evidence: Request/response evidence (legacy dict format)
+        evidence_signals: Structured evidence signals [{signal, source, raw_data, weight}]
     """
     db = await get_database()
 
-    # Generate ID
     existing = await db.get_findings()
     finding_id = f"FIND-{len(existing) + 1:03d}"
+
+    # Build evidence chain from signals if provided
+    chain = EvidenceChain()
+    if evidence_signals:
+        for sig in evidence_signals:
+            chain = chain.add(
+                signal=sig.get("signal", ""),
+                source=sig.get("source", ""),
+                raw_data=sig.get("raw_data", ""),
+                weight=sig.get("weight", 1.0),
+            )
+
+    conf = Confidence(confidence.lower())
 
     finding = Finding(
         id=finding_id,
         title=title,
         severity=Severity(severity.lower()),
+        confidence=conf,
         cvss=cvss,
         cvss_vector=cvss_vector,
         phase=Phase.VULN_ANALYSIS,
@@ -60,6 +78,7 @@ async def report_finding(
         references=references or [],
         tools_used=tools_used or [],
         evidence=evidence or {},
+        evidence_chain=chain,
     )
 
     await db.save_finding(finding)
@@ -67,6 +86,8 @@ async def report_finding(
     return {
         "id": finding_id,
         "status": "saved",
+        "confidence": conf.value,
+        "evidence_summary": chain.summary(),
         "finding": finding.model_dump(mode="json"),
     }
 
@@ -93,7 +114,6 @@ async def report_cvss(
         integrity: N(one), L(ow), H(igh)
         availability: N(one), L(ow), H(igh)
     """
-    # CVSS 3.1 base score calculation
     av_scores = {"N": 0.85, "A": 0.62, "L": 0.55, "P": 0.20}
     ac_scores = {"L": 0.77, "H": 0.44}
     pr_scores_unchanged = {"N": 0.85, "L": 0.62, "H": 0.27}
@@ -116,14 +136,13 @@ async def report_cvss(
         base_score = 0.0
     elif scope == "U":
         base_score = min(exploitability + impact_score, 10.0)
-        base_score = round(base_score * 10) / 10  # round up to 1 decimal
+        base_score = round(base_score * 10) / 10
     else:
         base_score = min(1.08 * (exploitability + impact_score), 10.0)
         base_score = round(base_score * 10) / 10
 
     vector_string = f"CVSS:3.1/AV:{attack_vector}/AC:{attack_complexity}/PR:{privileges_required}/UI:{user_interaction}/S:{scope}/C:{confidentiality}/I:{integrity}/A:{availability}"
 
-    # Severity rating
     if base_score == 0:
         rating = "none"
     elif base_score < 4.0:
@@ -147,31 +166,63 @@ async def report_cvss(
 async def report_export(
     format: str = "markdown",
     template: str = "pentest",
+    min_confidence: str = "tentative",
 ) -> dict:
-    """Export all findings as a report.
+    """Export findings as a report with confidence filtering.
 
     Args:
         format: Output format — markdown, json
         template: Report template — pentest, bug_bounty, api_assessment
+        min_confidence: Minimum confidence to include — confirmed, firm, tentative
     """
     db = await get_database()
     findings = await db.get_findings()
+    metrics = get_metrics()
+
+    # Filter by confidence
+    confidence_order = {"confirmed": 3, "firm": 2, "tentative": 1}
+    min_level = confidence_order.get(min_confidence, 0)
+    filtered = [
+        f for f in findings
+        if confidence_order.get(f.get("confidence", "tentative"), 1) >= min_level
+    ]
 
     if format == "json":
-        return {"format": "json", "findings": findings, "total": len(findings)}
+        return {
+            "format": "json",
+            "findings": filtered,
+            "total": len(filtered),
+            "filtered_from": len(findings),
+            "min_confidence": min_confidence,
+            "metrics": metrics.aggregate_summary(),
+        }
 
     # Markdown report
     now = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    # Confidence emoji mapping for visual scanning
+    conf_badge = {"confirmed": "[CONFIRMED]", "firm": "[FIRM]", "tentative": "[TENTATIVE]"}
+
     lines = [
         "# Security Assessment Report",
         f"\n**Generated**: {now}",
-        f"\n**Total Findings**: {len(findings)}",
-        "\n## Summary\n",
+        f"\n**Total Findings**: {len(filtered)} (filtered from {len(findings)}, min confidence: {min_confidence})",
+        "\n## Quality Metrics\n",
     ]
 
+    # Metrics summary
+    agg = metrics.aggregate_summary()
+    quality = agg.get("quality_metrics", {})
+    conf_dist = agg.get("confidence_distribution", {})
+    lines.append(f"- **Precision**: {quality.get('precision', 'no feedback')}")
+    lines.append(f"- **FP Rate**: {quality.get('fp_rate', 'no feedback')}")
+    lines.append(f"- **Confirmed**: {conf_dist.get('confirmed', 0)} | **Firm**: {conf_dist.get('firm', 0)} | **Tentative**: {conf_dist.get('tentative', 0)}")
+    lines.append(f"- **Recommendation**: {agg.get('recommendation', '')}")
+
     # Severity counts
+    lines.append("\n## Summary\n")
     severity_counts = {"critical": 0, "high": 0, "medium": 0, "low": 0, "info": 0}
-    for f in findings:
+    for f in filtered:
         sev = f.get("severity", "info")
         severity_counts[sev] = severity_counts.get(sev, 0) + 1
 
@@ -181,27 +232,48 @@ async def report_export(
         if count > 0:
             lines.append(f"| {sev.capitalize()} | {count} |")
 
-    lines.append("\n## Findings\n")
+    # Findings grouped by confidence
+    for conf_level in ("confirmed", "firm", "tentative"):
+        conf_findings = [f for f in filtered if f.get("confidence", "tentative") == conf_level]
+        if not conf_findings:
+            continue
 
-    for f in findings:
-        lines.append(f"### {f['id']}: {f['title']}")
-        lines.append(f"\n**Severity**: {f['severity'].capitalize()}")
-        if f.get("cvss"):
-            lines.append(f"**CVSS**: {f['cvss']}")
-        lines.append(f"**Target**: {f['target']}")
-        lines.append(f"\n{f['description']}")
+        lines.append(f"\n## {conf_badge.get(conf_level, '')} Findings — {conf_level.capitalize()}\n")
 
-        steps = json.loads(f.get("reproduction_steps", "[]")) if isinstance(f.get("reproduction_steps"), str) else f.get("reproduction_steps", [])
-        if steps:
-            lines.append("\n**Steps to Reproduce**:")
-            for i, step in enumerate(steps, 1):
-                lines.append(f"{i}. {step}")
+        for f in conf_findings:
+            lines.append(f"### {f['id']}: {f['title']}")
+            lines.append(f"\n**Severity**: {f['severity'].capitalize()} | **Confidence**: {f.get('confidence', 'tentative').capitalize()}")
+            if f.get("cvss"):
+                lines.append(f"**CVSS**: {f['cvss']}")
+            lines.append(f"**Target**: {f['target']}")
+            lines.append(f"\n{f['description']}")
 
-        if f.get("impact"):
-            lines.append(f"\n**Impact**: {f['impact']}")
-        if f.get("remediation"):
-            lines.append(f"\n**Remediation**: {f['remediation']}")
-        lines.append("\n---\n")
+            # Evidence chain summary
+            evidence_chain = f.get("evidence_chain")
+            if evidence_chain and isinstance(evidence_chain, dict):
+                signals = evidence_chain.get("items", [])
+                if signals:
+                    lines.append("\n**Evidence Chain**:")
+                    for sig in signals:
+                        lines.append(f"- [{sig.get('source', '')}] {sig.get('signal', '')} (weight: {sig.get('weight', 0)})")
+
+                fp_checks = evidence_chain.get("false_positive_checks", [])
+                if fp_checks:
+                    lines.append("\n**FP Checks Performed**:")
+                    for check in fp_checks:
+                        lines.append(f"- {check}")
+
+            steps = json.loads(f.get("reproduction_steps", "[]")) if isinstance(f.get("reproduction_steps"), str) else f.get("reproduction_steps", [])
+            if steps:
+                lines.append("\n**Steps to Reproduce**:")
+                for i, step in enumerate(steps, 1):
+                    lines.append(f"{i}. {step}")
+
+            if f.get("impact"):
+                lines.append(f"\n**Impact**: {f['impact']}")
+            if f.get("remediation"):
+                lines.append(f"\n**Remediation**: {f['remediation']}")
+            lines.append("\n---\n")
 
     report_content = "\n".join(lines)
 
@@ -209,7 +281,9 @@ async def report_export(
         "format": "markdown",
         "template": template,
         "content": report_content,
-        "total_findings": len(findings),
+        "total_findings": len(filtered),
+        "filtered_from": len(findings),
+        "min_confidence": min_confidence,
     }
 
 
@@ -222,8 +296,10 @@ async def report_bounty_template(
     poc: str,
     impact: str,
     fix: str = "",
+    confidence: str = "tentative",
+    evidence_signals: list[str] | None = None,
 ) -> dict:
-    """Generate a bug bounty report from findings.
+    """Generate a bug bounty report template with confidence metadata.
 
     Args:
         title: Vulnerability title
@@ -234,14 +310,26 @@ async def report_bounty_template(
         poc: Proof of concept (curl command, screenshot path)
         impact: Impact statement
         fix: Suggested fix
+        confidence: confirmed, firm, tentative
+        evidence_signals: List of evidence signal descriptions
     """
     steps_md = "\n".join(f"{i}. {s}" for i, s in enumerate(steps, 1))
+    signals_md = ""
+    if evidence_signals:
+        signals_md = "\n### Evidence Chain\n" + "\n".join(f"- {s}" for s in evidence_signals)
+
+    conf_note = ""
+    if confidence == "tentative":
+        conf_note = "\n> **Note**: This finding has TENTATIVE confidence. Manual verification recommended before submission.\n"
+    elif confidence == "firm":
+        conf_note = "\n> **Note**: This finding has FIRM confidence based on multiple technical indicators.\n"
 
     report = f"""## {title}
 
 **Severity**: {severity.capitalize()}
 **Target**: {target}
-
+**Confidence**: {confidence.capitalize()}
+{conf_note}
 ### Description
 {description}
 
@@ -252,7 +340,7 @@ async def report_bounty_template(
 ```
 {poc}
 ```
-
+{signals_md}
 ### Impact
 {impact}
 
@@ -263,4 +351,44 @@ async def report_bounty_template(
     return {
         "report": report,
         "format": "bug_bounty",
+        "confidence": confidence,
+    }
+
+
+async def report_metrics() -> dict:
+    """Return current session metrics — precision, FP rates, confidence distribution.
+
+    Use this to evaluate the quality of findings before submitting reports.
+    """
+    metrics = get_metrics()
+    return metrics.aggregate_summary()
+
+
+async def report_confirm_finding(
+    finding_id: str,
+    is_true_positive: bool,
+) -> dict:
+    """Record user feedback on a finding to improve metrics.
+
+    Args:
+        finding_id: Finding ID (e.g., FIND-001)
+        is_true_positive: True if the finding is a real vulnerability
+    """
+    db = await get_database()
+    findings = await db.get_findings()
+    metrics = get_metrics()
+
+    matching = [f for f in findings if f.get("id") == finding_id]
+    if not matching:
+        return {"error": f"Finding {finding_id} not found"}
+
+    finding = matching[0]
+    tools = finding.get("tools_used", [])
+    for tool in tools:
+        metrics.record_user_feedback(tool, is_true_positive)
+
+    return {
+        "finding_id": finding_id,
+        "feedback": "true_positive" if is_true_positive else "false_positive",
+        "updated_metrics": metrics.aggregate_summary(),
     }

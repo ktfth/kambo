@@ -322,17 +322,19 @@ async def list_tools() -> list[Tool]:
             "required": ["target"],
         }),
         # Reporting
-        Tool(name="report_finding", description="Create and store a security finding", inputSchema={
+        Tool(name="report_finding", description="Create and store a security finding with confidence level", inputSchema={
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
                 "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+                "confidence": {"type": "string", "enum": ["confirmed", "firm", "tentative"], "description": "Evidence-based confidence level"},
                 "target": {"type": "string"},
                 "description": {"type": "string"},
                 "reproduction_steps": {"type": "array", "items": {"type": "string"}},
                 "impact": {"type": "string"},
                 "remediation": {"type": "string"},
                 "cvss": {"type": "number"},
+                "evidence_signals": {"type": "array", "items": {"type": "object"}, "description": "Evidence signals [{signal, source, raw_data, weight}]"},
             },
             "required": ["title", "severity", "target", "description"],
         }),
@@ -349,14 +351,15 @@ async def list_tools() -> list[Tool]:
                 "availability": {"type": "string", "enum": ["N", "L", "H"]},
             },
         }),
-        Tool(name="report_export", description="Export findings as markdown or JSON report", inputSchema={
+        Tool(name="report_export", description="Export findings as report with confidence filtering", inputSchema={
             "type": "object",
             "properties": {
                 "format": {"type": "string", "enum": ["markdown", "json"]},
                 "template": {"type": "string", "enum": ["pentest", "bug_bounty", "api_assessment"]},
+                "min_confidence": {"type": "string", "enum": ["confirmed", "firm", "tentative"], "description": "Minimum confidence level to include"},
             },
         }),
-        Tool(name="report_bounty_template", description="Generate bug bounty report template", inputSchema={
+        Tool(name="report_bounty_template", description="Generate bug bounty report template with confidence", inputSchema={
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
@@ -367,8 +370,22 @@ async def list_tools() -> list[Tool]:
                 "poc": {"type": "string"},
                 "impact": {"type": "string"},
                 "fix": {"type": "string"},
+                "confidence": {"type": "string", "enum": ["confirmed", "firm", "tentative"]},
+                "evidence_signals": {"type": "array", "items": {"type": "string"}, "description": "Evidence signal descriptions"},
             },
             "required": ["title", "severity", "target", "description", "steps", "poc", "impact"],
+        }),
+        Tool(name="report_metrics", description="View session quality metrics — precision, FP rates, confidence distribution", inputSchema={
+            "type": "object",
+            "properties": {},
+        }),
+        Tool(name="report_confirm_finding", description="Confirm or reject a finding to improve precision metrics", inputSchema={
+            "type": "object",
+            "properties": {
+                "finding_id": {"type": "string", "description": "Finding ID (e.g., FIND-001)"},
+                "is_true_positive": {"type": "boolean", "description": "True if the finding is a real vulnerability"},
+            },
+            "required": ["finding_id", "is_true_positive"],
         }),
         # Container health
         Tool(name="container_status", description="Check Kali container health status", inputSchema={
@@ -497,9 +514,13 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
     if name == "report_cvss":
         return await reporting.report_cvss(**args)
     if name == "report_export":
-        return await reporting.report_export(args.get("format", "markdown"), args.get("template", "pentest"))
+        return await reporting.report_export(args.get("format", "markdown"), args.get("template", "pentest"), args.get("min_confidence", "tentative"))
     if name == "report_bounty_template":
         return await reporting.report_bounty_template(**args)
+    if name == "report_metrics":
+        return await reporting.report_metrics()
+    if name == "report_confirm_finding":
+        return await reporting.report_confirm_finding(args["finding_id"], args["is_true_positive"])
 
     return {"error": f"Unknown tool: {name}"}
 
