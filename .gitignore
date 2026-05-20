@@ -9,11 +9,7 @@ build/
 .venv/
 venv/
 env/
-output/*.db
-output/*.json
-output/*.txt
-output/*.xml
-output/*.zip
+output/
 .env
 .env.local
 *.log
