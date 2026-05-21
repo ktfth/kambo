@@ -69,30 +69,26 @@ class ScopeManager:
 
     def _matches(self, target: str, pattern: str) -> bool:
         """Check if target matches a scope pattern (domain, CIDR, wildcard)."""
+        # Extract domain from URL before any other checks
+        domain_match = re.search(r"https?://([^/:]+)", target)
+        effective_target = domain_match.group(1) if domain_match else target
+
         # Wildcard domain: *.example.com
         if pattern.startswith("*."):
             base = pattern[2:]
-            return target == base or target.endswith(f".{base}")
+            return effective_target == base or effective_target.endswith(f".{base}")
 
         # CIDR notation
         if "/" in pattern:
             try:
                 network = ipaddress.ip_network(pattern, strict=False)
-                ip = ipaddress.ip_address(target)
+                ip = ipaddress.ip_address(effective_target)
                 return ip in network
             except ValueError:
                 pass
 
         # Exact match
-        if target == pattern:
-            return True
-
-        # URL contains domain
-        domain_match = re.search(r"https?://([^/:]+)", target)
-        if domain_match:
-            return self._matches(domain_match.group(1), pattern)
-
-        return False
+        return effective_target == pattern or target == pattern
 
 
 # Global scope manager instance
