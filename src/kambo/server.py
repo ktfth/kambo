@@ -28,7 +28,7 @@ from kambo.resources.findings_resource import get_findings_data
 from kambo.resources.scope_resource import get_scope_data
 from kambo.resources.session_resource import get_session_data
 from kambo.scope import get_scope_manager
-from kambo.tools import recon, scanning, vulns, exploit, post_exploit, reporting, api_security, cloud, containers, ad
+from kambo.tools import recon, scanning, vulns, exploit, post_exploit, reporting, api_security, cloud, containers, ad, bounty
 
 # Create the MCP server
 server = Server("kambo")
@@ -387,6 +387,43 @@ async def list_tools() -> list[Tool]:
             },
             "required": ["finding_id", "is_true_positive"],
         }),
+        # Bounty Intelligence
+        Tool(name="bounty_classify", description="Classify and score a bug bounty program (tier S/A/B/C/D, ROI, approach)", inputSchema={
+            "type": "object",
+            "properties": {
+                "name": {"type": "string", "description": "Program name (e.g., Uber, Shopify)"},
+                "platform": {"type": "string", "enum": ["hackerone", "bugcrowd", "intigriti", "yeswehack", "self-hosted"]},
+                "domains": {"type": "array", "items": {"type": "string"}, "description": "In-scope domains"},
+                "wildcards": {"type": "array", "items": {"type": "string"}, "description": "Wildcard scopes (*.example.com)"},
+                "asset_types": {"type": "array", "items": {"type": "string", "enum": ["web", "api", "mobile", "infrastructure", "iot", "thick_client"]}},
+                "exclusions": {"type": "array", "items": {"type": "string"}},
+                "payout_critical": {"type": "number", "description": "Max payout for critical ($)"},
+                "payout_high": {"type": "number"},
+                "payout_medium": {"type": "number"},
+                "payout_low": {"type": "number"},
+                "bounty_type": {"type": "string", "enum": ["cash", "swag", "points", "hall_of_fame"]},
+                "bonus_active": {"type": "boolean"},
+                "managed": {"type": "boolean", "description": "Private/managed program"},
+                "vdp_only": {"type": "boolean", "description": "No cash — disclosure only"},
+                "launched_date": {"type": "string", "description": "ISO date when program launched"},
+                "response_time_days": {"type": "number"},
+                "tech_stack": {"type": "array", "items": {"type": "string"}},
+                "waf_detected": {"type": "boolean"},
+                "waf_name": {"type": "string"},
+                "subdomains_count": {"type": "integer"},
+                "open_ports_count": {"type": "integer"},
+                "api_endpoints_count": {"type": "integer"},
+                "has_swagger": {"type": "boolean"},
+            },
+            "required": ["name"],
+        }),
+        Tool(name="bounty_rank", description="Rank multiple bug bounty programs by ROI — returns prioritized hunting order", inputSchema={
+            "type": "object",
+            "properties": {
+                "programs": {"type": "array", "items": {"type": "object"}, "description": "List of program objects (same fields as bounty_classify)"},
+            },
+            "required": ["programs"],
+        }),
         # Container health
         Tool(name="container_status", description="Check Kali container health status", inputSchema={
             "type": "object", "properties": {},
@@ -531,6 +568,12 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         return await reporting.report_metrics()
     if name == "report_confirm_finding":
         return await reporting.report_confirm_finding(args["finding_id"], args["is_true_positive"])
+
+    # Bounty Intelligence
+    if name == "bounty_classify":
+        return await bounty.bounty_classify(**args)
+    if name == "bounty_rank":
+        return await bounty.bounty_rank(args["programs"])
 
     return {"error": f"Unknown tool: {name}"}
 
