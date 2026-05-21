@@ -399,6 +399,16 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Route tool calls to implementations."""
     try:
         result = await _dispatch_tool(name, arguments)
+
+        # Inject historical FP warning if available
+        from kambo.metrics import flush_metrics, get_metrics
+        warning = get_metrics().get_fp_warning(name)
+        if warning and isinstance(result, dict):
+            result["_historical_warning"] = warning
+
+        # Persist metrics after each tool call
+        await flush_metrics()
+
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
     except Exception as e:
         return [TextContent(type="text", text=json.dumps({"error": str(e)}, indent=2))]
@@ -605,8 +615,16 @@ def main() -> None:
     """Run the Kambo MCP server via stdio."""
     async def run():
         db = await get_database()
+
+        # Load historical metrics from previous sessions
+        from kambo.metrics import load_metrics, flush_metrics
+        await load_metrics()
+
         async with stdio_server() as (read_stream, write_stream):
             await server.run(read_stream, write_stream, server.create_initialization_options())
+
+        # Persist metrics before shutdown
+        await flush_metrics()
         await db.close()
 
     asyncio.run(run())

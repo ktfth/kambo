@@ -54,6 +54,20 @@ CREATE TABLE IF NOT EXISTS recon_data (
     source TEXT NOT NULL,
     timestamp TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS tool_metrics (
+    tool_name TEXT PRIMARY KEY,
+    total_runs INTEGER NOT NULL DEFAULT 0,
+    total_findings INTEGER NOT NULL DEFAULT 0,
+    confirmed_count INTEGER NOT NULL DEFAULT 0,
+    firm_count INTEGER NOT NULL DEFAULT 0,
+    tentative_count INTEGER NOT NULL DEFAULT 0,
+    user_confirmed INTEGER NOT NULL DEFAULT 0,
+    user_rejected INTEGER NOT NULL DEFAULT 0,
+    avg_evidence_weight REAL NOT NULL DEFAULT 0.0,
+    last_run TEXT,
+    updated_at TEXT NOT NULL
+);
 """
 
 
@@ -168,6 +182,52 @@ class Database:
         async with self._db.execute(
             "SELECT * FROM session_log ORDER BY timestamp DESC LIMIT ?", (limit,)
         ) as cursor:
+            columns = [desc[0] for desc in cursor.description]
+            rows = await cursor.fetchall()
+            return [dict(zip(columns, row)) for row in rows]
+
+    # --- Tool Metrics Persistence ---
+
+    async def save_tool_metrics(self, tool_name: str, metrics: dict) -> None:
+        """Persist per-tool metrics (upsert)."""
+        assert self._db is not None
+        await self._db.execute(
+            """INSERT INTO tool_metrics
+               (tool_name, total_runs, total_findings, confirmed_count, firm_count,
+                tentative_count, user_confirmed, user_rejected, avg_evidence_weight,
+                last_run, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+               ON CONFLICT(tool_name) DO UPDATE SET
+                total_runs = excluded.total_runs,
+                total_findings = excluded.total_findings,
+                confirmed_count = excluded.confirmed_count,
+                firm_count = excluded.firm_count,
+                tentative_count = excluded.tentative_count,
+                user_confirmed = excluded.user_confirmed,
+                user_rejected = excluded.user_rejected,
+                avg_evidence_weight = excluded.avg_evidence_weight,
+                last_run = excluded.last_run,
+                updated_at = excluded.updated_at""",
+            (
+                tool_name,
+                metrics.get("total_runs", 0),
+                metrics.get("total_findings", 0),
+                metrics.get("confirmed_count", 0),
+                metrics.get("firm_count", 0),
+                metrics.get("tentative_count", 0),
+                metrics.get("user_confirmed", 0),
+                metrics.get("user_rejected", 0),
+                metrics.get("avg_evidence_weight", 0.0),
+                metrics.get("last_run"),
+                datetime.now(timezone.utc).isoformat(),
+            ),
+        )
+        await self._db.commit()
+
+    async def load_all_tool_metrics(self) -> list[dict]:
+        """Load all persisted tool metrics."""
+        assert self._db is not None
+        async with self._db.execute("SELECT * FROM tool_metrics") as cursor:
             columns = [desc[0] for desc in cursor.description]
             rows = await cursor.fetchall()
             return [dict(zip(columns, row)) for row in rows]
