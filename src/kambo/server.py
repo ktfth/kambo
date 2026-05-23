@@ -519,6 +519,50 @@ async def list_tools() -> list[Tool]:
         Tool(name="pipeline_reset", description="Reset session pipeline for a new engagement", inputSchema={
             "type": "object", "properties": {},
         }),
+        # Platform Integration
+        Tool(name="platform_fetch_program", description="Fetch bug bounty program details from HackerOne or Bugcrowd", inputSchema={
+            "type": "object",
+            "properties": {
+                "platform": {"type": "string", "enum": ["hackerone", "bugcrowd"], "description": "Platform name"},
+                "handle": {"type": "string", "description": "Program handle/slug"},
+            },
+            "required": ["platform", "handle"],
+        }),
+        Tool(name="platform_fetch_scope", description="Fetch program scope (in-scope/out-of-scope assets) from platform API", inputSchema={
+            "type": "object",
+            "properties": {
+                "platform": {"type": "string", "enum": ["hackerone", "bugcrowd"]},
+                "handle": {"type": "string", "description": "Program handle/slug"},
+            },
+            "required": ["platform", "handle"],
+        }),
+        Tool(name="platform_check_duplicate", description="Check if a similar vulnerability was already reported/disclosed", inputSchema={
+            "type": "object",
+            "properties": {
+                "platform": {"type": "string", "enum": ["hackerone", "bugcrowd"]},
+                "handle": {"type": "string", "description": "Program handle/slug"},
+                "title": {"type": "string", "description": "Finding title to check"},
+                "vuln_type": {"type": "string", "description": "Vulnerability type keyword (sqli, xss, etc.)"},
+            },
+            "required": ["platform", "handle", "title"],
+        }),
+        Tool(name="platform_submit_report", description="Submit a vulnerability report to HackerOne or Bugcrowd", inputSchema={
+            "type": "object",
+            "properties": {
+                "platform": {"type": "string", "enum": ["hackerone", "bugcrowd"]},
+                "handle": {"type": "string", "description": "Program handle/slug"},
+                "title": {"type": "string", "description": "Report title"},
+                "body": {"type": "string", "description": "Full report body (markdown)"},
+                "severity": {"type": "string", "description": "Severity (critical, high, medium, low)"},
+                "impact": {"type": "string", "description": "Impact description"},
+                "asset": {"type": "string", "description": "Affected asset from scope"},
+                "weakness_id": {"type": "integer", "description": "CWE ID (HackerOne)"},
+                "priority": {"type": "integer", "description": "Priority 1-5 (Bugcrowd, 1=critical)"},
+                "vrt": {"type": "string", "description": "VRT classification (Bugcrowd)"},
+                "steps": {"type": "string", "description": "Steps to reproduce (Bugcrowd)"},
+            },
+            "required": ["platform", "handle", "title", "body"],
+        }),
     ]
 
 
@@ -724,6 +768,20 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         from kambo.pipeline import reset_pipeline
         reset_pipeline()
         return {"status": "pipeline_reset"}
+
+    # Platform Integration
+    if name == "platform_fetch_program":
+        from kambo.tools import platforms
+        return await platforms.platform_fetch_program(args["platform"], args["handle"])
+    if name == "platform_fetch_scope":
+        from kambo.tools import platforms
+        return await platforms.platform_fetch_scope(args["platform"], args["handle"])
+    if name == "platform_check_duplicate":
+        from kambo.tools import platforms
+        return await platforms.platform_check_duplicate(args["platform"], args["handle"], args["title"], args.get("vuln_type", ""))
+    if name == "platform_submit_report":
+        from kambo.tools import platforms
+        return await platforms.platform_submit_report(args["platform"], args["handle"], args)
 
     return {"error": f"Unknown tool: {name}"}
 
