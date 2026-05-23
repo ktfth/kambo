@@ -519,6 +519,22 @@ async def list_tools() -> list[Tool]:
         Tool(name="pipeline_reset", description="Reset session pipeline for a new engagement", inputSchema={
             "type": "object", "properties": {},
         }),
+        # Recon Monitoring
+        Tool(name="recon_snapshot", description="Take a snapshot of current recon data for a target — used for change detection over time", inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target domain"},
+            },
+            "required": ["target"],
+        }),
+        Tool(name="recon_diff", description="Compare current recon data against previous snapshot — detect new subdomains, ports, endpoints", inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target domain"},
+                "from_baseline": {"type": "boolean", "description": "Compare against first snapshot (true) or previous snapshot (false)", "default": False},
+            },
+            "required": ["target"],
+        }),
         # Platform Integration
         Tool(name="platform_fetch_program", description="Fetch bug bounty program details from HackerOne or Bugcrowd", inputSchema={
             "type": "object",
@@ -768,6 +784,31 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         from kambo.pipeline import reset_pipeline
         reset_pipeline()
         return {"status": "pipeline_reset"}
+
+    # Recon Monitoring
+    if name == "recon_snapshot":
+        from kambo.recon_monitor import get_monitor, snapshot_from_pipeline
+        snap = snapshot_from_pipeline(args["target"])
+        get_monitor().store_snapshot(snap)
+        return {
+            "status": "snapshot_stored",
+            "target": args["target"],
+            "subdomains": len(snap.subdomains),
+            "ports": len(snap.ports),
+            "urls": len(snap.urls),
+            "endpoints": len(snap.endpoints),
+            "snapshot_count": get_monitor().snapshot_count(args["target"]),
+        }
+    if name == "recon_diff":
+        from kambo.recon_monitor import get_monitor
+        monitor = get_monitor()
+        if args.get("from_baseline"):
+            diff = monitor.diff_from_baseline(args["target"])
+        else:
+            diff = monitor.diff_latest(args["target"])
+        if diff is None:
+            return {"error": "Need at least 2 snapshots to compute diff", "snapshot_count": monitor.snapshot_count(args["target"])}
+        return diff.summary()
 
     # Platform Integration
     if name == "platform_fetch_program":
