@@ -17,6 +17,6 @@ output/
 .coverage
 htmlcov/
 .claude/skills/gstack/
-.agents/skills/gstack/
+.agents/
 .playwright-mcp/
 reports/
