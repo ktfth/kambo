@@ -19,3 +19,4 @@ htmlcov/
 .claude/skills/gstack/
 .agents/skills/gstack/
 .playwright-mcp/
+reports/
