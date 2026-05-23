@@ -807,3 +807,417 @@ def _extract_context(text: str, pattern: str, context_chars: int = 200) -> str:
     start = max(0, m.start() - context_chars)
     end = min(len(text), m.end() + context_chars)
     return text[start:end]
+
+
+# ---------------------------------------------------------------------------
+# validate_rce — Remote Code Execution / Command Injection
+# ---------------------------------------------------------------------------
+
+# Patterns that indicate command execution succeeded
+_RCE_SIGNATURES: dict[str, list[str]] = {
+    "os_identity": [
+        r"uid=\d+\(\w+\)\s+gid=\d+",       # Linux id output
+        r"(nt authority|system|administrator)", # Windows whoami
+    ],
+    "system_info": [
+        r"Linux\s+\S+\s+\d+\.\d+",           # Linux uname
+        r"Windows\s+(NT|Server|\d+)",          # Windows ver
+        r"Darwin\s+\d+\.\d+",                 # macOS
+    ],
+    "time_based": [
+        r"real\s+\d+m[\d.]+s",                # time command output
+    ],
+    "dns_oob": [
+        r"(burpcollaborator|oastify|interact\.sh|canarytokens)", # OOB callbacks
+    ],
+}
+
+
+def validate_rce(
+    output: str,
+    payload: str = "",
+    expected_output: str = "",
+    baseline_body: str = "",
+    response_time_ms: float = 0,
+    baseline_time_ms: float = 0,
+) -> EvidenceChain:
+    """Validate Remote Code Execution / Command Injection findings.
+
+    Args:
+        output: Tool output / HTTP response body
+        payload: The injection payload used
+        expected_output: Expected output from the injected command (e.g., "root")
+        baseline_body: Response body without injection for comparison
+        response_time_ms: Response time with payload
+        baseline_time_ms: Response time without payload (for time-based detection)
+    """
+    chain = EvidenceChain()
+
+    # FP check: empty output
+    if not output or not output.strip():
+        chain = chain.add_fp_check("Empty output — no command execution evidence")
+        return chain
+
+    # FP check: error messages that indicate blocked injection
+    error_indicators = [
+        r"(syntax error|command not found|not recognized|illegal|forbidden)",
+        r"(waf|blocked|filtered|denied|rejected)",
+        r"(security exception|access denied|permission denied)",
+    ]
+    for pattern in error_indicators:
+        if re.search(pattern, output, re.IGNORECASE):
+            chain = chain.add_fp_check(f"Error/block indicator detected: {pattern}")
+            return chain
+
+    # FP check: payload reflected literally without execution evidence
+    if payload and payload in output:
+        has_exec_evidence = False
+        for sigs in _RCE_SIGNATURES.values():
+            for sig in sigs:
+                if re.search(sig, output, re.IGNORECASE):
+                    has_exec_evidence = True
+                    break
+            if has_exec_evidence:
+                break
+        if not has_exec_evidence:
+            chain = chain.add_fp_check("Payload reflected literally without execution evidence")
+            return chain
+
+    # Check for expected output (strongest signal)
+    if expected_output and expected_output in output:
+        chain = chain.add(
+            signal=f"Expected command output found: {expected_output[:100]}",
+            source="rce_output_match",
+            raw_data=output[:500],
+            weight=2.0,
+        )
+
+    # Check for OS identity signatures
+    for sig_type, patterns in _RCE_SIGNATURES.items():
+        for pattern in patterns:
+            if re.search(pattern, output, re.IGNORECASE):
+                chain = chain.add(
+                    signal=f"RCE signature matched: {sig_type}",
+                    source="rce_signature_analysis",
+                    raw_data=_extract_context(output, pattern),
+                    weight=1.5 if sig_type in ("os_identity", "dns_oob") else 0.8,
+                )
+                break  # one match per type
+
+    # Time-based detection
+    if response_time_ms > 0 and baseline_time_ms > 0:
+        delay = response_time_ms - baseline_time_ms
+        if delay > 4500:  # > 4.5s delay (typical sleep(5) injection)
+            chain = chain.add(
+                signal=f"Time-based delay detected: {delay:.0f}ms (baseline: {baseline_time_ms:.0f}ms)",
+                source="rce_time_analysis",
+                weight=1.0,
+            )
+
+    # Baseline comparison
+    if baseline_body and output.strip() != baseline_body.strip():
+        if abs(len(output) - len(baseline_body)) > 50:
+            chain = chain.add(
+                signal="Response differs significantly from baseline",
+                source="rce_baseline_comparison",
+                weight=0.3,
+            )
+
+    return chain
+
+
+# ---------------------------------------------------------------------------
+# validate_xxe — XML External Entity Injection
+# ---------------------------------------------------------------------------
+
+_XXE_SIGNATURES: dict[str, list[str]] = {
+    "file_content": [
+        r"root:.*:0:0:",                       # /etc/passwd
+        r"\[boot loader\]",                    # Windows boot.ini
+        r"<\?xml version=",                    # XML declaration in nested entity
+    ],
+    "error_disclosure": [
+        r"(SAXParseException|XMLSyntaxError|xml\.parsers)",
+        r"(SYSTEM|DOCTYPE|ENTITY).*not allowed",
+        r"(external entity|entity reference)",
+    ],
+    "oob_callback": [
+        r"(burpcollaborator|oastify|interact\.sh|canarytokens)",
+        r"DNS lookup.*\d{1,3}\.\d{1,3}",
+    ],
+    "ssrf_via_xxe": [
+        r"(169\.254\.169\.254|metadata\.google|metadata\.azure)",
+        r"(ami-id|instance-id|compute/metadata)",
+    ],
+}
+
+
+def validate_xxe(
+    output: str,
+    payload: str = "",
+    expected_content: str = "",
+    baseline_body: str = "",
+) -> EvidenceChain:
+    """Validate XML External Entity Injection findings.
+
+    Args:
+        output: Response body or tool output
+        payload: The XXE payload used
+        expected_content: Expected file content (e.g., "root:x:0:0")
+        baseline_body: Normal response without XXE for comparison
+    """
+    chain = EvidenceChain()
+
+    # FP check: empty output
+    if not output or not output.strip():
+        chain = chain.add_fp_check("Empty output — no XXE evidence")
+        return chain
+
+    # FP check: XML parsing disabled / entity rejected
+    reject_patterns = [
+        r"(external entities.*disabled|DTD.*not allowed|DOCTYPE.*disallowed)",
+        r"(entity.*rejected|xml.*blocked|feature.*not supported)",
+    ]
+    for pattern in reject_patterns:
+        if re.search(pattern, output, re.IGNORECASE):
+            chain = chain.add_fp_check(f"XXE blocked/rejected: {pattern}")
+            return chain
+
+    # FP check: generic error page (not XML-specific)
+    if re.search(r"(500 internal server error|service unavailable|bad request)", output, re.IGNORECASE):
+        if not any(re.search(p, output, re.IGNORECASE) for sigs in _XXE_SIGNATURES.values() for p in sigs):
+            chain = chain.add_fp_check("Generic error without XXE-specific content")
+            return chain
+
+    # Check for expected content (strongest signal)
+    if expected_content and expected_content in output:
+        chain = chain.add(
+            signal=f"Expected entity content found: {expected_content[:100]}",
+            source="xxe_content_match",
+            raw_data=output[:500],
+            weight=2.0,
+        )
+
+    # Check for XXE signatures
+    for sig_type, patterns in _XXE_SIGNATURES.items():
+        for pattern in patterns:
+            if re.search(pattern, output, re.IGNORECASE):
+                weight = 1.5 if sig_type in ("file_content", "oob_callback") else 0.8
+                chain = chain.add(
+                    signal=f"XXE signature: {sig_type}",
+                    source="xxe_signature_analysis",
+                    raw_data=_extract_context(output, pattern),
+                    weight=weight,
+                )
+                break
+
+    # Baseline comparison
+    if baseline_body and output.strip() != baseline_body.strip():
+        if abs(len(output) - len(baseline_body)) > 100:
+            chain = chain.add(
+                signal="Response differs significantly from baseline",
+                source="xxe_baseline_comparison",
+                weight=0.3,
+            )
+
+    return chain
+
+
+# ---------------------------------------------------------------------------
+# validate_csrf — Cross-Site Request Forgery
+# ---------------------------------------------------------------------------
+
+def validate_csrf(
+    output: str,
+    has_csrf_token: bool = False,
+    samesite_cookie: str = "",
+    content_type: str = "",
+    method: str = "POST",
+    cors_origin: str = "",
+    state_change_confirmed: bool = False,
+) -> EvidenceChain:
+    """Validate CSRF vulnerability findings.
+
+    Args:
+        output: Tool output / response body
+        has_csrf_token: Whether a CSRF token is present in the form/request
+        samesite_cookie: SameSite cookie attribute value ("strict", "lax", "none", "")
+        content_type: Response Content-Type header
+        method: HTTP method tested
+        cors_origin: CORS Allow-Origin header value
+        state_change_confirmed: Whether the action caused a real state change
+    """
+    chain = EvidenceChain()
+
+    # FP check: CSRF token is present and validated
+    if has_csrf_token:
+        chain = chain.add_fp_check("CSRF token present — likely validated server-side")
+        return chain
+
+    # FP check: SameSite=Strict cookies
+    if samesite_cookie.lower() == "strict":
+        chain = chain.add_fp_check("SameSite=Strict cookie — cross-origin requests blocked")
+        return chain
+
+    # FP check: JSON-only endpoints with proper content-type enforcement
+    if "application/json" in content_type.lower() and method == "POST":
+        if cors_origin not in ("*", "null"):
+            chain = chain.add_fp_check("JSON Content-Type with restrictive CORS — CSRF unlikely")
+            return chain
+
+    # Missing CSRF token is the primary signal
+    if not has_csrf_token:
+        chain = chain.add(
+            signal="No CSRF token in request/form",
+            source="csrf_token_check",
+            weight=0.8,
+        )
+
+    # SameSite=None or missing
+    if not samesite_cookie or samesite_cookie.lower() == "none":
+        chain = chain.add(
+            signal=f"SameSite cookie not set or set to None: '{samesite_cookie}'",
+            source="csrf_cookie_analysis",
+            raw_data=f"SameSite={samesite_cookie}",
+            weight=0.5,
+        )
+
+    # Permissive CORS increases exploitability
+    if cors_origin in ("*", "null"):
+        chain = chain.add(
+            signal=f"Permissive CORS origin: {cors_origin}",
+            source="csrf_cors_check",
+            weight=0.4,
+        )
+
+    # State change confirmed (strongest signal)
+    if state_change_confirmed:
+        chain = chain.add(
+            signal="State-changing action confirmed without CSRF protection",
+            source="csrf_state_change",
+            raw_data=output[:500] if output else "",
+            weight=1.5,
+        )
+
+    # SameSite=Lax reduces risk for non-GET requests
+    if samesite_cookie.lower() == "lax" and method != "GET":
+        chain = chain.add(
+            signal="SameSite=Lax mitigates top-level POST — but bypasses exist",
+            source="csrf_samesite_analysis",
+            weight=-0.3,  # reduce weight
+        )
+
+    return chain
+
+
+# ---------------------------------------------------------------------------
+# validate_open_redirect — Open Redirect
+# ---------------------------------------------------------------------------
+
+_REDIRECT_SIGNATURES: dict[str, list[str]] = {
+    "redirect_header": [
+        r"Location:\s*https?://(?:evil|attacker|external)",
+        r"Location:\s*//",
+    ],
+    "javascript_redirect": [
+        r"window\.location\s*=\s*['\"]https?://",
+        r"document\.location\s*=",
+        r"window\.open\s*\(",
+    ],
+    "meta_redirect": [
+        r"<meta\s+http-equiv=['\"]refresh['\"].*url=https?://",
+    ],
+}
+
+
+def validate_open_redirect(
+    output: str,
+    redirect_url: str = "",
+    final_url: str = "",
+    status_code: int = 0,
+    baseline_redirect: str = "",
+) -> EvidenceChain:
+    """Validate Open Redirect findings.
+
+    Args:
+        output: Response body/headers
+        redirect_url: The injected redirect URL
+        final_url: The URL the browser would follow to
+        status_code: HTTP status code (301, 302, 303, 307, 308)
+        baseline_redirect: Normal redirect destination without injection
+    """
+    chain = EvidenceChain()
+
+    # FP check: empty output
+    if not output and not final_url:
+        chain = chain.add_fp_check("Empty output — no redirect evidence")
+        return chain
+
+    # FP check: redirect stays on same domain as target (not as injected URL)
+    # An open redirect means the target app redirects to an attacker-controlled domain
+    # So we check if final_url goes to a DIFFERENT domain than the target app
+    if final_url and redirect_url:
+        from urllib.parse import urlparse
+        try:
+            final_domain = urlparse(final_url).netloc
+            injected_domain = urlparse(redirect_url).netloc
+            # If the final URL did NOT go to the injected domain, it's not an open redirect
+            if final_domain and injected_domain and final_domain != injected_domain:
+                chain = chain.add_fp_check("Redirect did not follow to injected domain — not an open redirect")
+                return chain
+        except Exception:
+            pass
+
+    # FP check: redirect to login/error page (common false positive)
+    if final_url:
+        safe_indicators = ["login", "error", "404", "denied", "forbidden"]
+        if any(ind in final_url.lower() for ind in safe_indicators):
+            chain = chain.add_fp_check("Redirect to login/error page — likely safe handler")
+            return chain
+
+    # FP check: not a redirect status code
+    if status_code and status_code not in (301, 302, 303, 307, 308):
+        if not any(re.search(p, output, re.IGNORECASE) for sigs in _REDIRECT_SIGNATURES.values() for p in sigs):
+            chain = chain.add_fp_check(f"Status code {status_code} is not a redirect")
+            return chain
+
+    # HTTP redirect header match
+    if status_code in (301, 302, 303, 307, 308) and redirect_url:
+        if redirect_url in output:
+            chain = chain.add(
+                signal=f"HTTP {status_code} redirect to attacker-controlled URL",
+                source="redirect_header_analysis",
+                raw_data=output[:500],
+                weight=1.5,
+            )
+
+    # Final URL matches injected destination
+    if final_url and redirect_url and redirect_url in final_url:
+        chain = chain.add(
+            signal=f"Browser followed redirect to injected URL: {final_url[:200]}",
+            source="redirect_follow_analysis",
+            raw_data=final_url,
+            weight=2.0,
+        )
+
+    # Check for redirect signatures in body
+    for sig_type, patterns in _REDIRECT_SIGNATURES.items():
+        for pattern in patterns:
+            if re.search(pattern, output, re.IGNORECASE):
+                chain = chain.add(
+                    signal=f"Redirect signature: {sig_type}",
+                    source="redirect_signature_analysis",
+                    raw_data=_extract_context(output, pattern),
+                    weight=0.8,
+                )
+                break
+
+    # Baseline comparison
+    if baseline_redirect and final_url and baseline_redirect != final_url:
+        chain = chain.add(
+            signal=f"Redirect destination changed from baseline: {baseline_redirect[:100]} → {final_url[:100]}",
+            source="redirect_baseline_comparison",
+            weight=0.5,
+        )
+
+    return chain
