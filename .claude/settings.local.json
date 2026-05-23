@@ -9,5 +9,18 @@
       "mcp__kambo__recon_certs",
       "mcp__kambo__recon_asn"
     ]
+  },
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python scripts/classify_file.py \"$TOOL_INPUT_FILE_PATH\" 2>/dev/null || true"
+          }
+        ]
+      }
+    ]
   }
 }

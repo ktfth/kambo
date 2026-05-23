@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Pre-commit hook — validates no program-specific data enters the repo.
+# Install: git config core.hooksPath .githooks
+
+set -euo pipefail
+
+# Run the Python validator
+python "$(git rev-parse --show-toplevel)/scripts/validate_commit.py"
+exit $?
