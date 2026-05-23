@@ -338,6 +338,10 @@ def validate_ssrf(
     chain = EvidenceChain()
     body_lower = response_body.lower()
 
+    # FP check: common non-SSRF error responses
+    if re.search(r"(invalid url|bad request|url not allowed|blocked)", body_lower):
+        chain = chain.add_fp_check("Server rejected the URL — input validation in place")
+
     # Status code check (weak signal alone)
     if status_code in ("200", "301", "302"):
         chain = chain.add(
@@ -404,6 +408,10 @@ def validate_idor(
 
     if not test_responses:
         return chain
+
+    # FP check: baseline itself returned error
+    if baseline_response.status != 200:
+        chain = chain.add_fp_check(f"Baseline returned {baseline_response.status} — endpoint may not exist")
 
     unique_hashes: set[str] = set()
     accessible_count = 0
@@ -637,6 +645,11 @@ def validate_subdomain_takeover(
 
     if not cname:
         chain = chain.add_fp_check("No CNAME record found — not a takeover candidate")
+        return chain
+
+    # FP check: CNAME points to the same organization (internal redirect, not dangling)
+    if cname_resolves and not response_body:
+        chain = chain.add_fp_check("CNAME resolves with no error page — likely internal redirect")
         return chain
 
     if cname_resolves:
