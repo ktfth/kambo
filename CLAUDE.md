@@ -38,6 +38,7 @@ When the user's request matches an available skill, invoke it via the Skill tool
 | Crafter loop, auto improve loop, self-improve | `/kambo-loop` |
 | Visualize, diagram, mermaid, show progress | `/kambo-viz` |
 | Tutorial, teach, how to use, walkthrough | `/kambo-awake` |
+| Code review, check quality, review kambo | `/kambo-review` |
 
 ## Self-Improvement Loop
 
