@@ -43,9 +43,9 @@ class TestPricingBasics:
             vuln_type="xss",
             payouts=payouts,
         )
-        # TENTATIVE = 0.25 confidence factor, heavily discounted
+        # TENTATIVE = 0.30 confidence factor, heavily discounted
         assert est.expected_value < 1500
-        assert est.confidence_factor == 0.25
+        assert est.confidence_factor == 0.30
         assert est.readiness == ReportReadiness.NEEDS_VERIFY
 
     def test_info_severity_zero_value(self) -> None:

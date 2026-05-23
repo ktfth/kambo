@@ -70,6 +70,7 @@ class DiscoveryTimer(BaseModel):
             self._end_current_tool(now)
         object.__setattr__(self, "_active_tool", tool_name)
         object.__setattr__(self, "_tool_start", now)
+        object.__setattr__(self, "_active_target", target)
 
     def end_tool(self) -> float:
         """End timing the current tool. Returns duration in seconds."""
@@ -85,9 +86,11 @@ class DiscoveryTimer(BaseModel):
         if self._active_tool is None or self._tool_start is None:
             return 0
         duration = (now - self._tool_start).total_seconds()
+        target = getattr(self, "_active_target", "")
         event = TimerEvent(
             phase=self._active_phase or "unknown",
             tool_name=self._active_tool,
+            target=target,
             started_at=self._tool_start,
             ended_at=now,
             duration_seconds=round(duration, 2),
@@ -95,6 +98,7 @@ class DiscoveryTimer(BaseModel):
         self.events.append(event)
         object.__setattr__(self, "_active_tool", None)
         object.__setattr__(self, "_tool_start", None)
+        object.__setattr__(self, "_active_target", "")
         return duration
 
     def _end_current_phase(self, now: datetime) -> float:

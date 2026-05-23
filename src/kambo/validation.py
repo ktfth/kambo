@@ -129,14 +129,15 @@ def validate_sqli(raw_output: str) -> EvidenceChain:
             weight=0.5,
         )
 
-    # Check injection technique type
+    # Check injection technique type (aggregate to avoid weight inflation)
     techniques = re.findall(r"Type:\s*(.+?)(?:\n|$)", raw_output)
-    for tech in techniques:
+    if techniques:
+        unique_techs = sorted(set(t.strip() for t in techniques))
         chain = chain.add(
-            signal=f"Injection technique: {tech.strip()}",
+            signal=f"Injection techniques: {', '.join(unique_techs)}",
             source="sqlmap",
-            raw_data=tech.strip(),
-            weight=0.3,
+            raw_data="; ".join(unique_techs),
+            weight=min(0.5, 0.2 + len(unique_techs) * 0.1),  # cap at 0.5
         )
 
     return chain
@@ -196,7 +197,10 @@ def validate_xss(
     )
 
     # Check context: is it inside a tag, attribute, script block, or comment?
-    before_payload = raw_output[:raw_output.index(payload)]
+    payload_idx = raw_output.find(payload)
+    if payload_idx < 0:
+        return chain  # Payload was encoded after earlier check passed
+    before_payload = raw_output[:payload_idx]
     in_script = "<script" in before_payload[max(0, len(before_payload) - 500):]
     in_comment = "<!--" in before_payload[max(0, len(before_payload) - 200):]
 
@@ -365,9 +369,7 @@ def validate_ssrf(
 
     # Empty or error-like response is likely a false positive
     if len(response_body.strip()) < 10:
-        chain = chain.add_fp_check("Response body too short — likely error or blocked")
-        # Reset weight to near zero
-        return EvidenceChain()
+        return EvidenceChain().add_fp_check("Response body too short — likely error or blocked")
 
     return chain
 

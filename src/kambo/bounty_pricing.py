@@ -47,10 +47,16 @@ _VULN_ACCEPTANCE_RATES: dict[str, float] = {
     "csrf": 0.70,
     "information_disclosure": 0.55,
     "open_redirect": 0.50,
-    "rate_limiting": 0.40,
+    "insecure_deserialization": 0.85,
+    "hardcoded_credentials": 0.88,
+    "prototype_pollution": 0.80,
+    "ssti": 0.86,
+    "path_traversal": 0.82,
+    "xxe": 0.83,
 
     # Low acceptance — often marked informational or duplicate
-    "missing_headers": 0.20,
+    "rate_limiting": 0.10,
+    "missing_headers": 0.05,
     "version_disclosure": 0.15,
     "default_credentials": 0.65,
 }
@@ -58,8 +64,8 @@ _VULN_ACCEPTANCE_RATES: dict[str, float] = {
 # Confidence → probability the finding is real (not FP)
 _CONFIDENCE_MULTIPLIERS: dict[Confidence, float] = {
     Confidence.CONFIRMED: 0.95,  # 95% chance it's real
-    Confidence.FIRM: 0.65,       # 65% chance
-    Confidence.TENTATIVE: 0.25,  # 25% chance
+    Confidence.FIRM: 0.75,       # 75% — 2+ independent signals
+    Confidence.TENTATIVE: 0.30,  # 30% — single signal, high FP risk
 }
 
 # Severity downgrade probability — bounty programs often downgrade severity
@@ -171,8 +177,8 @@ def estimate_finding_value(
 
     # Range: pessimistic assumes downgrade + lower acceptance
     payout_min = base_payout * confidence_factor * acceptance_factor * 0.5 * bonus_mult
-    # Range: optimistic assumes full acceptance
-    payout_max = base_payout * min(1.0, confidence_factor * 1.3) * bonus_mult
+    # Range: optimistic assumes no downgrade + full acceptance
+    payout_max = base_payout * confidence_factor * acceptance_factor * 1.2 * bonus_mult
 
     # Report readiness assessment
     readiness, blockers = _assess_readiness(

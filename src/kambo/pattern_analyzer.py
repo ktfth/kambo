@@ -35,7 +35,7 @@ def analyze_tool_performance(tracker: MetricsTracker | None = None) -> list[dict
         finding_rate = m.total_findings / m.total_runs if m.total_runs > 0 else 0
 
         # Elite: high precision + high finding rate
-        if total_reviewed >= 3 and m.precision is not None and m.precision >= 0.8:
+        if total_reviewed >= 3 and m.precision is not None and m.precision >= 0.70:
             insights.append({
                 "tool": name,
                 "category": "elite",
@@ -52,15 +52,18 @@ def analyze_tool_performance(tracker: MetricsTracker | None = None) -> list[dict
                 "action": "Cross-validate with second tool before reporting. Consider skipping.",
                 "data": {"fp_rate": m.fp_rate, "rejected": m.user_rejected},
             })
-        # Noisy: many findings but low confirmed ratio
-        elif m.total_findings > 5 and m.confirmed_count / max(1, m.total_findings) < 0.2:
-            insights.append({
-                "tool": name,
-                "category": "noisy",
-                "reason": f"Only {m.confirmed_count}/{m.total_findings} findings are CONFIRMED",
-                "action": "Increase evidence threshold or add validation step.",
-                "data": {"confirmed_ratio": m.confirmed_count / m.total_findings},
-            })
+        # Noisy: many findings but low confirmed ratio (use reviewed count if available)
+        elif m.total_findings > 5:
+            effective_total = total_reviewed if total_reviewed >= 3 else m.total_findings
+            confirmed_ratio = m.confirmed_count / max(1, effective_total)
+            if confirmed_ratio < 0.25:
+                insights.append({
+                    "tool": name,
+                    "category": "noisy",
+                    "reason": f"Only {m.confirmed_count}/{effective_total} findings are CONFIRMED",
+                    "action": "Increase evidence threshold or add validation step.",
+                    "data": {"confirmed_ratio": confirmed_ratio},
+                })
         # Reliable: decent precision, consistent
         elif total_reviewed >= 2 and m.precision is not None and m.precision >= 0.5:
             insights.append({
@@ -91,6 +94,13 @@ def analyze_confidence_distribution(tracker: MetricsTracker | None = None) -> di
 
     if total == 0:
         return {"status": "no_data", "recommendation": "Run tools to collect data."}
+
+    if total < 5:
+        return {
+            "status": "low_sample",
+            "recommendation": f"Only {total} findings — need at least 5 for reliable quality assessment.",
+            "distribution": {"confirmed": confirmed, "firm": firm, "tentative": tentative},
+        }
 
     confirmed_pct = confirmed / total
     tentative_pct = tentative / total
