@@ -12,6 +12,7 @@ Usage:
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any
@@ -283,7 +284,6 @@ def _parse_vhosts(result: dict) -> list[DiscoveredAsset]:
 
 def _is_ip(value: str) -> bool:
     """Check if a string looks like an IP address."""
-    import re
     return bool(re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", value))
 
 
@@ -418,7 +418,6 @@ class SessionPipeline:
         self._assets: list[DiscoveredAsset] = []
         self._tools_run: list[str] = []
         self._findings: list[dict[str, Any]] = []
-        self._phase_history: list[Phase] = []
 
     @property
     def assets(self) -> list[DiscoveredAsset]:
@@ -495,7 +494,7 @@ class SessionPipeline:
     def targets_for_phase(self, phase: Phase) -> list[str]:
         """Get the best target list for a given phase based on accumulated data."""
         if phase == Phase.RECON:
-            return self.get_values(AssetType.SUBDOMAIN) or []
+            return self.get_values(AssetType.SUBDOMAIN)
 
         if phase == Phase.SCANNING:
             subs = self.get_values(AssetType.SUBDOMAIN)
@@ -588,7 +587,6 @@ class SessionPipeline:
         self._assets.clear()
         self._tools_run.clear()
         self._findings.clear()
-        self._phase_history.clear()
 
 
 def _infer_vuln_type(tool_name: str) -> str:

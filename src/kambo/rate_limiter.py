@@ -14,8 +14,8 @@ It provides signals that tools and the pipeline can use to adjust.
 from __future__ import annotations
 
 import random
+import re
 import time
-from datetime import datetime, timezone
 from typing import Any
 
 from pydantic import BaseModel, Field
@@ -122,17 +122,16 @@ def detect_waf(response_body: str, response_headers: str = "") -> str | None:
 
     Returns the WAF name if detected, None otherwise.
     """
-    import re
-
     combined = (response_body + " " + response_headers).lower()
+    headers_lower = response_headers.lower()
 
     for sig in WAF_SIGNATURES:
         for pattern in sig.patterns:
-            if re.search(pattern, combined, re.IGNORECASE):
+            if re.search(pattern, combined):
                 return sig.name
 
         for header in sig.headers:
-            if header.lower() in response_headers.lower():
+            if header.lower() in headers_lower:
                 return sig.name
 
     return None
@@ -140,8 +139,6 @@ def detect_waf(response_body: str, response_headers: str = "") -> str | None:
 
 def detect_block(response_body: str, status_code: int = 0) -> bool:
     """Detect if a response indicates rate limiting or blocking."""
-    import re
-
     if status_code in (429, 503, 403):
         return True
 

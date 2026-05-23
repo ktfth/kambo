@@ -12,6 +12,11 @@ from typing import Any
 import yaml
 
 
+def _make_template_id(vuln_type: str, finding_id: str) -> str:
+    """Generate a consistent template ID."""
+    return f"kambo-{vuln_type}-{finding_id.lower().replace('-', '')}"
+
+
 def generate_template(
     finding_id: str,
     vuln_type: str,
@@ -42,7 +47,7 @@ def generate_template(
         description: Finding description
         tags: Additional tags
     """
-    template_id = f"kambo-{vuln_type}-{finding_id.lower().replace('-', '')}"
+    template_id = _make_template_id(vuln_type, finding_id)
     effective_tags = tags or [vuln_type, "kambo", "custom"]
 
     template: dict[str, Any] = {
@@ -238,10 +243,7 @@ class TemplateLibrary:
     def generate_and_store(self, **kwargs: Any) -> str:
         """Generate a template and store it in the library."""
         yaml_content = generate_template(**kwargs)
-        # Extract template_id from the YAML
-        import re
-        id_match = re.search(r"^id:\s*(.+)$", yaml_content, re.MULTILINE)
-        template_id = id_match.group(1).strip() if id_match else f"kambo-{kwargs.get('vuln_type', 'unknown')}"
+        template_id = _make_template_id(kwargs.get("vuln_type", "unknown"), kwargs.get("finding_id", "FIND-000"))
         self.add(template_id, yaml_content)
         return yaml_content
 

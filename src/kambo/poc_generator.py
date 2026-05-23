@@ -7,7 +7,7 @@ finding details to include in bug bounty reports.
 from __future__ import annotations
 
 from typing import Any
-from urllib.parse import quote, urlparse
+from urllib.parse import quote
 
 
 def generate_poc(

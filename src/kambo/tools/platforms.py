@@ -12,6 +12,7 @@ API credentials are read from environment variables:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 from typing import Any
@@ -398,18 +399,18 @@ def bc_submit_report(
 async def platform_fetch_program(platform: str, handle: str) -> dict[str, Any]:
     """Fetch program details from any platform."""
     if platform == "hackerone":
-        return h1_fetch_program(handle)
+        return await asyncio.to_thread(h1_fetch_program, handle)
     if platform == "bugcrowd":
-        return bc_fetch_program(handle)
+        return await asyncio.to_thread(bc_fetch_program, handle)
     return {"error": f"Unsupported platform: {platform}. Use 'hackerone' or 'bugcrowd'."}
 
 
 async def platform_fetch_scope(platform: str, handle: str) -> dict[str, Any]:
     """Fetch program scope from any platform."""
     if platform == "hackerone":
-        return h1_fetch_scope(handle)
+        return await asyncio.to_thread(h1_fetch_scope, handle)
     if platform == "bugcrowd":
-        return bc_fetch_scope(handle)
+        return await asyncio.to_thread(bc_fetch_scope, handle)
     return {"error": f"Unsupported platform: {platform}"}
 
 
@@ -418,29 +419,27 @@ async def platform_check_duplicate(
 ) -> dict[str, Any]:
     """Check for duplicate reports on any platform."""
     if platform == "hackerone":
-        return h1_check_duplicate(handle, title, vuln_type)
+        return await asyncio.to_thread(h1_check_duplicate, handle, title, vuln_type)
     return {"error": f"Duplicate check not available for: {platform}", "platform": platform}
 
 
 async def platform_submit_report(platform: str, handle: str, report: dict[str, Any]) -> dict[str, Any]:
     """Submit a report to any platform."""
     if platform == "hackerone":
-        return h1_submit_report(
-            handle=handle,
-            title=report["title"],
-            vulnerability_info=report["body"],
-            severity=report.get("severity", "medium"),
-            weakness_id=report.get("weakness_id", 0),
-            asset_identifier=report.get("asset", ""),
-            impact=report.get("impact", ""),
+        return await asyncio.to_thread(
+            h1_submit_report,
+            handle, report["title"], report["body"],
+            report.get("severity", "medium"),
+            report.get("weakness_id", 0),
+            report.get("asset", ""),
+            report.get("impact", ""),
         )
     if platform == "bugcrowd":
-        return bc_submit_report(
-            slug=handle,
-            title=report["title"],
-            description=report["body"],
-            severity=report.get("priority", 3),
-            vrt=report.get("vrt", ""),
-            steps_to_reproduce=report.get("steps", ""),
+        return await asyncio.to_thread(
+            bc_submit_report,
+            handle, report["title"], report["body"],
+            report.get("priority", 3),
+            report.get("vrt", ""),
+            report.get("steps", ""),
         )
     return {"error": f"Unsupported platform: {platform}"}

@@ -20,15 +20,17 @@ from mcp.types import (
 from kambo.config import get_config
 from kambo.database import get_database
 from kambo.docker_runner import get_runner
-from kambo.models import Context, EngagementScope, ScopeTarget
+from kambo.models import Context, EngagementScope, Phase, ScopeTarget
+from kambo.pipeline import get_pipeline, reset_pipeline
 from kambo.prompts.api_assessment import get_api_assessment_prompt
 from kambo.prompts.bug_bounty import get_bug_bounty_prompt
 from kambo.prompts.full_pentest import get_full_pentest_prompt
+from kambo.recon_monitor import get_monitor, snapshot_from_pipeline
 from kambo.resources.findings_resource import get_findings_data
 from kambo.resources.scope_resource import get_scope_data
 from kambo.resources.session_resource import get_session_data
 from kambo.scope import get_scope_manager
-from kambo.tools import recon, scanning, vulns, exploit, post_exploit, reporting, api_security, cloud, containers, ad, bounty
+from kambo.tools import recon, scanning, vulns, exploit, post_exploit, reporting, api_security, cloud, containers, ad, bounty, platforms
 
 # Create the MCP server
 server = Server("kambo")
@@ -582,6 +584,13 @@ async def list_tools() -> list[Tool]:
     ]
 
 
+_PIPELINE_SKIP_TOOLS = frozenset({
+    "pipeline_ingest", "pipeline_status", "pipeline_next", "pipeline_targets",
+    "pipeline_reset", "set_scope", "container_status",
+    "recon_snapshot", "recon_diff",
+})
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Route tool calls to implementations."""
@@ -589,8 +598,7 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
         result = await _dispatch_tool(name, arguments)
 
         # Auto-ingest results into pipeline for context accumulation
-        if isinstance(result, dict) and name not in ("pipeline_ingest", "pipeline_status", "pipeline_next", "pipeline_targets", "pipeline_reset", "set_scope", "container_status"):
-            from kambo.pipeline import get_pipeline
+        if isinstance(result, dict) and name not in _PIPELINE_SKIP_TOOLS:
             try:
                 get_pipeline().ingest(name, result)
             except Exception:
@@ -750,7 +758,6 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
 
     # Session Pipeline
     if name == "pipeline_ingest":
-        from kambo.pipeline import get_pipeline
         pipeline = get_pipeline()
         new_assets = pipeline.ingest(args["tool_name"], args["result"])
         return {
@@ -763,9 +770,8 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         return get_pipeline().summary()
     if name == "pipeline_next":
         from kambo.pipeline import get_pipeline
-        from kambo.models import Phase as P
         pipeline = get_pipeline()
-        phase = P(args["phase"])
+        phase = Phase(args["phase"])
         steps = pipeline.suggest_next_steps(phase, args.get("max_steps", 5))
         return {
             "phase": args["phase"],
@@ -781,13 +787,11 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         targets = pipeline.targets_for_phase(P(args["phase"]))
         return {"phase": args["phase"], "targets": targets, "count": len(targets)}
     if name == "pipeline_reset":
-        from kambo.pipeline import reset_pipeline
         reset_pipeline()
         return {"status": "pipeline_reset"}
 
     # Recon Monitoring
     if name == "recon_snapshot":
-        from kambo.recon_monitor import get_monitor, snapshot_from_pipeline
         snap = snapshot_from_pipeline(args["target"])
         get_monitor().store_snapshot(snap)
         return {
@@ -800,7 +804,6 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
             "snapshot_count": get_monitor().snapshot_count(args["target"]),
         }
     if name == "recon_diff":
-        from kambo.recon_monitor import get_monitor
         monitor = get_monitor()
         if args.get("from_baseline"):
             diff = monitor.diff_from_baseline(args["target"])
@@ -812,16 +815,12 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
 
     # Platform Integration
     if name == "platform_fetch_program":
-        from kambo.tools import platforms
         return await platforms.platform_fetch_program(args["platform"], args["handle"])
     if name == "platform_fetch_scope":
-        from kambo.tools import platforms
         return await platforms.platform_fetch_scope(args["platform"], args["handle"])
     if name == "platform_check_duplicate":
-        from kambo.tools import platforms
         return await platforms.platform_check_duplicate(args["platform"], args["handle"], args["title"], args.get("vuln_type", ""))
     if name == "platform_submit_report":
-        from kambo.tools import platforms
         return await platforms.platform_submit_report(args["platform"], args["handle"], args)
 
     return {"error": f"Unknown tool: {name}"}

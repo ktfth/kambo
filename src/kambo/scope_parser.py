@@ -106,20 +106,20 @@ def check_target_in_scope(
     """
     warnings: list[str] = []
     matched = ""
-    is_excluded = False
+    matched_exclusion = ""
 
     # Check exclusions first
     for excl in scope.exclusions:
         if _matches_scope_entry(target, excl):
-            is_excluded = True
+            matched_exclusion = excl
             break
 
-    if is_excluded:
+    if matched_exclusion:
         return {
             "target": target,
             "in_scope": False,
             "is_excluded": True,
-            "matched_exclusion": excl,
+            "matched_exclusion": matched_exclusion,
             "warnings": ["Target matches an exclusion pattern"],
         }
 
