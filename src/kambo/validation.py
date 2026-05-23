@@ -666,6 +666,98 @@ def validate_subdomain_takeover(
 
 
 # ---------------------------------------------------------------------------
+# Path Traversal / LFI validation
+# ---------------------------------------------------------------------------
+
+# Known file content signatures that prove successful traversal
+_TRAVERSAL_SIGNATURES: dict[str, list[str]] = {
+    "unix_passwd": [r"root:.*:0:0:", r"daemon:.*:\d+:\d+:", r"nobody:.*:"],
+    "unix_shadow": [r"\$\d\$.*\$", r"root:\$"],  # password hashes
+    "unix_hosts": [r"127\.0\.0\.1\s+localhost"],
+    "windows_ini": [r"\[boot loader\]", r"\[operating systems\]"],
+    "windows_hosts": [r"127\.0\.0\.1\s+localhost"],
+    "web_config": [r"<configuration>", r"connectionString"],
+    "ssh_keys": [r"-----BEGIN.*PRIVATE KEY-----"],
+}
+
+
+def validate_path_traversal(
+    response_body: str,
+    payload: str,
+    baseline_body: str = "",
+) -> EvidenceChain:
+    """Validate path traversal / LFI based on response content analysis.
+
+    A successful traversal shows file contents that match known signatures.
+    A false positive shows the payload reflected but no file content.
+
+    Args:
+        response_body: Response body from the traversal attempt
+        payload: The traversal payload used (e.g., ../../etc/passwd)
+        baseline_body: Normal response body for comparison
+    """
+    chain = EvidenceChain()
+
+    if not response_body or len(response_body.strip()) < 10:
+        return chain.add_fp_check("Response body too short — likely blocked")
+
+    body_lower = response_body.lower()
+
+    # Check for error indicators first — they prove the path was processed
+    # even when the payload appears literally in the error message
+    error_indicators = [
+        (r"failed to open stream", "PHP file inclusion error"),
+        (r"no such file or directory", "File not found error — path processed"),
+        (r"permission denied", "Permission denied — path exists but not readable"),
+        (r"include\(\).*failed", "PHP include() failed — LFI path processed"),
+    ]
+    has_error_indicator = False
+    for pattern, description in error_indicators:
+        if re.search(pattern, body_lower):
+            chain = chain.add(
+                signal=description,
+                source="error_analysis",
+                weight=0.4,
+            )
+            has_error_indicator = True
+
+    # FP check: if payload is reflected literally without file content or error signals
+    if payload in response_body and not has_error_indicator and not any(
+        re.search(sigs[0], response_body) for sigs in _TRAVERSAL_SIGNATURES.values()
+    ):
+        chain = chain.add_fp_check("Payload reflected literally without file content signatures")
+        return chain
+
+    # Check for known file content signatures
+    for file_type, patterns in _TRAVERSAL_SIGNATURES.items():
+        for pattern in patterns:
+            if re.search(pattern, response_body, re.IGNORECASE):
+                chain = chain.add(
+                    signal=f"File content signature matched: {file_type}",
+                    source="traversal_content_analysis",
+                    raw_data=_extract_context(response_body, pattern),
+                    weight=1.5,
+                )
+                break  # one match per file type is enough
+
+    # FP check: compare against baseline to filter generic responses
+    if baseline_body:
+        if response_body.strip() == baseline_body.strip():
+            chain = chain.add_fp_check("Response identical to baseline — no traversal effect")
+            return EvidenceChain().add_fp_check("Response identical to baseline")
+
+        # If response differs significantly, that's an additional signal
+        if abs(len(response_body) - len(baseline_body)) > 100:
+            chain = chain.add(
+                signal="Response length differs significantly from baseline",
+                source="baseline_comparison",
+                weight=0.3,
+            )
+
+    return chain
+
+
+# ---------------------------------------------------------------------------
 # Helpers
 # ---------------------------------------------------------------------------
 

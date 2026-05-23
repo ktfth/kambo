@@ -7,6 +7,7 @@ from kambo.validation import (
     validate_cors,
     validate_idor,
     validate_jwt,
+    validate_path_traversal,
     validate_sqli,
     validate_ssrf,
     validate_subdomain_takeover,
@@ -292,3 +293,42 @@ class TestSubdomainTakeoverValidation:
         chain = validate_subdomain_takeover("something.custom.com.", False)
         assert chain.total_weight > 0
         assert chain.total_weight < 1.0  # dangling but no fingerprint
+
+
+class TestPathTraversal:
+    def test_etc_passwd_detected(self) -> None:
+        body = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin\n"
+        chain = validate_path_traversal(body, "../../etc/passwd")
+        assert chain.confidence in (Confidence.CONFIRMED, Confidence.FIRM)
+        assert chain.total_weight >= 1.5
+
+    def test_windows_ini_detected(self) -> None:
+        body = "[boot loader]\ntimeout=30\ndefault=multi(0)disk(0)\n[operating systems]\n"
+        chain = validate_path_traversal(body, "..\\..\\boot.ini")
+        assert chain.total_weight >= 1.5
+
+    def test_ssh_key_detected(self) -> None:
+        body = "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA..."
+        chain = validate_path_traversal(body, "../../root/.ssh/id_rsa")
+        assert chain.total_weight >= 1.5
+
+    def test_payload_reflected_not_executed(self) -> None:
+        body = "You searched for: ../../etc/passwd\nNo results found."
+        chain = validate_path_traversal(body, "../../etc/passwd")
+        assert chain.total_weight == 0
+        assert len(chain.false_positive_checks) >= 1
+
+    def test_empty_response(self) -> None:
+        chain = validate_path_traversal("", "../../etc/passwd")
+        assert chain.total_weight == 0
+
+    def test_baseline_identical_is_fp(self) -> None:
+        body = "Default page content"
+        chain = validate_path_traversal(body, "../../etc/passwd", baseline_body="Default page content")
+        assert chain.total_weight == 0
+        assert len(chain.false_positive_checks) >= 1
+
+    def test_php_error_detected(self) -> None:
+        body = "Warning: include(../../etc/passwd) failed to open stream: No such file or directory"
+        chain = validate_path_traversal(body, "../../etc/passwd")
+        assert chain.total_weight > 0  # error = path processed
