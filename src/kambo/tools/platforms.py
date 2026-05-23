@@ -70,18 +70,33 @@ def h1_fetch_program(handle: str) -> dict[str, Any]:
 def h1_fetch_scope(handle: str) -> dict[str, Any]:
     """Fetch structured assets (scope) for a HackerOne program.
 
+    Paginates through all results to avoid missing assets.
+
     Args:
         handle: Program handle
     """
     auth = _h1_auth()
-    resp = requests.get(
-        f"{_H1_BASE}/hackers/programs/{quote(handle)}/structured_scopes",
-        auth=auth,
-        params={"page[size]": 100},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    raw_scopes = resp.json().get("data", [])
+    raw_scopes: list[dict] = []
+    page_number = 1
+    max_pages = 10  # safety cap
+
+    while page_number <= max_pages:
+        resp = requests.get(
+            f"{_H1_BASE}/hackers/programs/{quote(handle)}/structured_scopes",
+            auth=auth,
+            params={"page[size]": 100, "page[number]": page_number},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        page_data = data.get("data", [])
+        raw_scopes.extend(page_data)
+
+        # Check for next page
+        next_link = data.get("links", {}).get("next")
+        if not next_link or len(page_data) < 100:
+            break
+        page_number += 1
 
     in_scope = []
     out_of_scope = []
@@ -275,18 +290,31 @@ def bc_fetch_program(slug: str) -> dict[str, Any]:
 def bc_fetch_scope(slug: str) -> dict[str, Any]:
     """Fetch scope/targets for a Bugcrowd program.
 
+    Paginates through all results to avoid missing assets.
+
     Args:
         slug: Program slug
     """
     headers = _bc_headers()
-    resp = requests.get(
-        f"{_BC_BASE}/programs/{quote(slug)}/targets",
-        headers=headers,
-        params={"page[limit]": 100},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    raw_targets = resp.json().get("data", [])
+    raw_targets: list[dict] = []
+    offset = 0
+    max_pages = 10
+
+    for _ in range(max_pages):
+        resp = requests.get(
+            f"{_BC_BASE}/programs/{quote(slug)}/targets",
+            headers=headers,
+            params={"page[limit]": 100, "page[offset]": offset},
+            timeout=30,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        page_data = data.get("data", [])
+        raw_targets.extend(page_data)
+
+        if len(page_data) < 100:
+            break
+        offset += 100
 
     targets = []
     for item in raw_targets:

@@ -552,10 +552,10 @@ async def list_tools() -> list[Tool]:
             },
             "required": ["platform", "handle"],
         }),
-        Tool(name="platform_check_duplicate", description="Check if a similar vulnerability was already reported/disclosed", inputSchema={
+        Tool(name="platform_check_duplicate", description="Check if a similar vulnerability was already reported/disclosed (HackerOne only)", inputSchema={
             "type": "object",
             "properties": {
-                "platform": {"type": "string", "enum": ["hackerone", "bugcrowd"]},
+                "platform": {"type": "string", "enum": ["hackerone"]},
                 "handle": {"type": "string", "description": "Program handle/slug"},
                 "title": {"type": "string", "description": "Finding title to check"},
                 "vuln_type": {"type": "string", "description": "Vulnerability type keyword (sqli, xss, etc.)"},
