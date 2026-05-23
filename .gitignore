@@ -16,3 +16,4 @@ output/
 .pytest_cache/
 .coverage
 htmlcov/
+.claude/skills/gstack/
