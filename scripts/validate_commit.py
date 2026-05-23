@@ -151,6 +151,7 @@ def check_blocked_extension(filepath: str) -> Violation | None:
 _SELF_SAFE_PATHS = {
     "scripts/validate_commit.py",  # contains detection patterns (not real data)
     "scripts/classify_file.py",
+    "src/kambo/validation.py",  # contains regex patterns for detection (not real secrets/domains)
 }
 
 

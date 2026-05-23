@@ -93,6 +93,18 @@ def validate_sqli(raw_output: str) -> EvidenceChain:
     chain = EvidenceChain()
     lower = raw_output.lower()
 
+    # FP check: empty or error output
+    if not raw_output.strip():
+        return chain.add_fp_check("No sqlmap output — tool may have failed or timed out")
+
+    # FP check: connection errors
+    if re.search(r"(connection refused|connection timed out|unable to connect)", lower):
+        return chain.add_fp_check("sqlmap could not connect to target")
+
+    # FP check: WAF/IPS blocking
+    if re.search(r"(waf|ips|firewall).*(detected|block)", lower):
+        chain = chain.add_fp_check("WAF/IPS detected — results may be unreliable")
+
     # Check for explicit non-vulnerable indicators first
     for pattern in _SQLI_FALSE_POSITIVE_PATTERNS:
         if re.search(pattern, lower):
@@ -519,6 +531,19 @@ def validate_bfla(
 def validate_jwt(raw_output: str, crack_output: str) -> EvidenceChain:
     """Validate JWT vulnerabilities from jwt_tool output."""
     chain = EvidenceChain()
+
+    # FP check: empty or error output
+    if not crack_output.strip() and not raw_output.strip():
+        return chain.add_fp_check("No output from jwt_tool — tool may have failed")
+
+    # FP check: token parsing failure
+    if re.search(r"(invalid|malformed|not a valid).*token", raw_output, re.IGNORECASE):
+        return chain.add_fp_check("JWT token is invalid/malformed — cannot assess")
+
+    # FP check: wordlist exhausted without finding
+    crack_lower = crack_output.lower()
+    if any(neg in crack_lower for neg in ["no match", "not found", "no result", "0 found", "exhausted"]):
+        chain = chain.add_fp_check("Wordlist exhausted without cracking secret")
 
     # Check for weak secret cracked
     if re.search(r"\[#\]\s*FOUND", crack_output, re.IGNORECASE):
