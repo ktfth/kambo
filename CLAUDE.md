@@ -36,6 +36,8 @@ When the user's request matches an available skill, invoke it via the Skill tool
 | Calibrate, adjust weights, recalibrate, tune | `/kambo-calibrate` |
 | Report, generate report, bounty report, submit | `/kambo-report` |
 | Crafter loop, auto improve loop, self-improve | `/kambo-loop` |
+| Visualize, diagram, mermaid, show progress | `/kambo-viz` |
+| Tutorial, teach, how to use, walkthrough | `/kambo-awake` |
 
 ## Self-Improvement Loop
 
