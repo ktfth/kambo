@@ -148,6 +148,56 @@ class TestSessionLog:
         assert len(logs) == 5
 
 
+class TestMigration:
+    @pytest.mark.asyncio
+    async def test_migrate_adds_missing_columns(self, tmp_path) -> None:
+        """Simulate a pre-migration DB (no confidence/evidence_chain columns)."""
+        import aiosqlite
+
+        db_path = tmp_path / "old.db"
+        # Create a DB with the old schema (no confidence, no evidence_chain)
+        async with aiosqlite.connect(str(db_path)) as conn:
+            await conn.execute("""
+                CREATE TABLE findings (
+                    id TEXT PRIMARY KEY,
+                    title TEXT NOT NULL,
+                    severity TEXT NOT NULL,
+                    cvss REAL,
+                    cvss_vector TEXT,
+                    phase TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    description TEXT NOT NULL,
+                    reproduction_steps TEXT DEFAULT '[]',
+                    evidence TEXT DEFAULT '{}',
+                    impact TEXT DEFAULT '',
+                    remediation TEXT DEFAULT '',
+                    references_json TEXT DEFAULT '[]',
+                    tools_used TEXT DEFAULT '[]',
+                    timestamp TEXT NOT NULL
+                )
+            """)
+            await conn.commit()
+
+        # Now open with Kambo Database — migration should add columns
+        db = Database(db_path)
+        await db.connect()
+        cols = await db._get_columns("findings")
+        assert "confidence" in cols
+        assert "evidence_chain" in cols
+        await db.close()
+
+    @pytest.mark.asyncio
+    async def test_migrate_idempotent(self, tmp_path) -> None:
+        """Running migration twice should not fail."""
+        db = Database(tmp_path / "fresh.db")
+        await db.connect()
+        # Second connect on same DB should not raise
+        await db._migrate()
+        cols = await db._get_columns("findings")
+        assert "confidence" in cols
+        await db.close()
+
+
 class TestReconData:
     @pytest.mark.asyncio
     async def test_save_and_retrieve_recon(self, db: Database) -> None:

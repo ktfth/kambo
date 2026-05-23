@@ -82,7 +82,37 @@ class Database:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         self._db = await aiosqlite.connect(str(self._path))
         await self._db.executescript(_SCHEMA)
+        await self._migrate()
         await self._db.commit()
+
+    async def _migrate(self) -> None:
+        """Apply schema migrations for existing databases.
+
+        CREATE TABLE IF NOT EXISTS does not alter existing tables,
+        so columns added after initial creation must be migrated here.
+        """
+        assert self._db is not None
+        existing = await self._get_columns("findings")
+
+        migrations: list[str] = []
+        if "confidence" not in existing:
+            migrations.append(
+                "ALTER TABLE findings ADD COLUMN confidence TEXT NOT NULL DEFAULT 'tentative'"
+            )
+        if "evidence_chain" not in existing:
+            migrations.append(
+                "ALTER TABLE findings ADD COLUMN evidence_chain TEXT DEFAULT '{}'"
+            )
+
+        for sql in migrations:
+            await self._db.execute(sql)
+
+    async def _get_columns(self, table: str) -> set[str]:
+        """Get column names for a table."""
+        assert self._db is not None
+        async with self._db.execute(f"PRAGMA table_info({table})") as cursor:
+            rows = await cursor.fetchall()
+            return {row[1] for row in rows}
 
     async def close(self) -> None:
         if self._db:
