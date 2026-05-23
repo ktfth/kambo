@@ -424,6 +424,67 @@ async def list_tools() -> list[Tool]:
             },
             "required": ["programs"],
         }),
+        Tool(name="bounty_estimate_value", description="Estimate monetary value of a finding — expected payout, readiness, ROI", inputSchema={
+            "type": "object",
+            "properties": {
+                "title": {"type": "string", "description": "Finding title"},
+                "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+                "confidence": {"type": "string", "enum": ["confirmed", "firm", "tentative"]},
+                "vuln_type": {"type": "string", "description": "Vulnerability type (sqli, xss, idor, ssrf, cors, bola, rce, etc.)"},
+                "program_name": {"type": "string"},
+                "payout_critical": {"type": "number", "description": "Program max critical payout ($)"},
+                "payout_high": {"type": "number"},
+                "payout_medium": {"type": "number"},
+                "payout_low": {"type": "number"},
+                "bonus_active": {"type": "boolean"},
+                "bonus_multiplier": {"type": "number", "description": "Bonus multiplier (e.g., 2.0)"},
+                "managed": {"type": "boolean"},
+                "has_poc": {"type": "boolean", "description": "Whether PoC exists"},
+                "has_reproduction_steps": {"type": "boolean"},
+                "evidence_signals_count": {"type": "integer"},
+                "hours_spent": {"type": "number", "description": "Hours spent on this finding (0 = use timer)"},
+            },
+            "required": ["title", "severity", "vuln_type"],
+        }),
+        Tool(name="bounty_session_value", description="Calculate total session value — aggregate all findings, ROI, readiness", inputSchema={
+            "type": "object",
+            "properties": {
+                "findings": {"type": "array", "items": {"type": "object"}, "description": "List of findings [{title, severity, confidence, vuln_type, has_poc, has_reproduction_steps, evidence_signals_count}]"},
+                "program_name": {"type": "string"},
+                "payout_critical": {"type": "number"},
+                "payout_high": {"type": "number"},
+                "payout_medium": {"type": "number"},
+                "payout_low": {"type": "number"},
+                "bonus_active": {"type": "boolean"},
+                "bonus_multiplier": {"type": "number"},
+                "managed": {"type": "boolean"},
+            },
+            "required": ["findings"],
+        }),
+        # Discovery Timer
+        Tool(name="bounty_timer_start", description="Start timing a discovery phase for ROI tracking", inputSchema={
+            "type": "object",
+            "properties": {
+                "phase": {"type": "string", "description": "Phase name (recon, scanning, vulnerability_analysis, exploitation, reporting)"},
+            },
+            "required": ["phase"],
+        }),
+        Tool(name="bounty_timer_tool", description="Record a tool execution within the current timed phase", inputSchema={
+            "type": "object",
+            "properties": {
+                "tool_name": {"type": "string", "description": "Tool being executed"},
+                "target": {"type": "string", "description": "Target being tested"},
+            },
+            "required": ["tool_name"],
+        }),
+        Tool(name="bounty_timer_stop", description="Stop timer and get full timing breakdown by phase and tool", inputSchema={
+            "type": "object",
+            "properties": {},
+        }),
+        Tool(name="bounty_timer_reset", description="Reset the timer for a new hunting session", inputSchema={
+            "type": "object",
+            "properties": {},
+        }),
         # Container health
         Tool(name="container_status", description="Check Kali container health status", inputSchema={
             "type": "object", "properties": {},
@@ -574,6 +635,20 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         return await bounty.bounty_classify(**args)
     if name == "bounty_rank":
         return await bounty.bounty_rank(args["programs"])
+    if name == "bounty_estimate_value":
+        return await bounty.bounty_estimate_value(**args)
+    if name == "bounty_session_value":
+        return await bounty.bounty_session_value(**args)
+
+    # Discovery Timer
+    if name == "bounty_timer_start":
+        return await bounty.bounty_timer_start(args["phase"])
+    if name == "bounty_timer_tool":
+        return await bounty.bounty_timer_tool(args["tool_name"], args.get("target", ""))
+    if name == "bounty_timer_stop":
+        return await bounty.bounty_timer_stop()
+    if name == "bounty_timer_reset":
+        return await bounty.bounty_timer_reset()
 
     return {"error": f"Unknown tool: {name}"}
 

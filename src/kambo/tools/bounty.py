@@ -1,4 +1,4 @@
-"""Bug Bounty intelligence tools — classify, score, rank programs."""
+"""Bug Bounty intelligence tools — classify, score, rank, price, time."""
 
 from __future__ import annotations
 
@@ -8,7 +8,16 @@ from kambo.bounty_intel import (
     rank_programs,
     score_program,
 )
+from kambo.bounty_pricing import (
+    PricingEstimate,
+    ProgramPayouts,
+    ReportReadiness,
+    estimate_finding_value,
+    estimate_session_value,
+)
+from kambo.discovery_timer import get_timer, reset_timer
 from kambo.metrics import get_metrics
+from kambo.models import Confidence, Severity
 
 
 async def bounty_classify(
@@ -202,3 +211,239 @@ def _pick_recommendation(ranked: list) -> str:
     if top.tier.value == "B":
         return f"{top.program_name} is moderate value. Consider if you have niche expertise in {', '.join(top.priority_vulns[:2])}."
     return f"All programs scored low. Consider finding new programs or waiting for bonus events."
+
+
+# ---------------------------------------------------------------------------
+# Pricing
+# ---------------------------------------------------------------------------
+
+async def bounty_estimate_value(
+    title: str,
+    severity: str,
+    confidence: str = "tentative",
+    vuln_type: str = "xss",
+    program_name: str = "",
+    payout_critical: float = 0,
+    payout_high: float = 0,
+    payout_medium: float = 0,
+    payout_low: float = 0,
+    bonus_active: bool = False,
+    bonus_multiplier: float = 1.0,
+    managed: bool = False,
+    has_poc: bool = False,
+    has_reproduction_steps: bool = False,
+    evidence_signals_count: int = 0,
+    hours_spent: float = 0,
+) -> dict:
+    """Estimate monetary value of a single finding.
+
+    Calculates expected payout considering severity, confidence discount,
+    vulnerability acceptance rates, and program payout structure.
+
+    Args:
+        title: Finding title
+        severity: critical, high, medium, low, info
+        confidence: confirmed, firm, tentative
+        vuln_type: Vulnerability type (sqli, xss, idor, ssrf, cors, etc.)
+        program_name: Bug bounty program name
+        payout_critical: Program's max critical payout ($)
+        payout_high: Program's max high payout ($)
+        payout_medium: Program's max medium payout ($)
+        payout_low: Program's max low payout ($)
+        bonus_active: Whether bonus multiplier is active
+        bonus_multiplier: Bonus multiplier value (e.g., 2.0)
+        managed: Whether this is a managed/private program
+        has_poc: Whether proof of concept exists
+        has_reproduction_steps: Whether reproduction steps are documented
+        evidence_signals_count: Number of evidence signals
+        hours_spent: Hours spent discovering this finding
+    """
+    metrics = get_metrics()
+
+    payouts = ProgramPayouts(
+        program_name=program_name,
+        payout_critical=payout_critical,
+        payout_high=payout_high,
+        payout_medium=payout_medium,
+        payout_low=payout_low,
+        bonus_active=bonus_active,
+        bonus_multiplier=bonus_multiplier,
+        managed=managed,
+    )
+
+    # Use timer data if hours not explicitly provided
+    if hours_spent <= 0:
+        timer = get_timer()
+        hours_spent = timer.total_hours
+
+    estimate = estimate_finding_value(
+        title=title,
+        severity=Severity(severity.lower()),
+        confidence=Confidence(confidence.lower()),
+        vuln_type=vuln_type,
+        payouts=payouts,
+        has_poc=has_poc,
+        has_reproduction_steps=has_reproduction_steps,
+        evidence_signals_count=evidence_signals_count,
+        hours_spent=hours_spent,
+    )
+
+    metrics.record_run("bounty_estimate_value")
+
+    return {
+        "finding": estimate.finding_title,
+        "severity": estimate.severity.value,
+        "confidence": estimate.confidence.value,
+        "vuln_type": estimate.vuln_type,
+        "pricing": {
+            "base_payout": estimate.base_payout,
+            "expected_value": estimate.expected_value,
+            "range_min": estimate.payout_range_min,
+            "range_max": estimate.payout_range_max,
+        },
+        "factors": {
+            "confidence_factor": estimate.confidence_factor,
+            "acceptance_factor": estimate.acceptance_factor,
+            "downgrade_factor": estimate.downgrade_factor,
+            "bonus_multiplier": estimate.bonus_multiplier,
+        },
+        "readiness": {
+            "status": estimate.readiness.value,
+            "blockers": estimate.readiness_blockers,
+        },
+        "roi": {
+            "hours_spent": estimate.hours_spent,
+            "dollar_per_hour": estimate.dollar_per_hour,
+        },
+    }
+
+
+async def bounty_session_value(
+    findings: list[dict],
+    program_name: str = "",
+    payout_critical: float = 0,
+    payout_high: float = 0,
+    payout_medium: float = 0,
+    payout_low: float = 0,
+    bonus_active: bool = False,
+    bonus_multiplier: float = 1.0,
+    managed: bool = False,
+) -> dict:
+    """Calculate total session value across all findings.
+
+    Aggregates expected value, readiness status, and ROI metrics.
+
+    Args:
+        findings: List of finding dicts with keys: title, severity, confidence,
+                  vuln_type, has_poc, has_reproduction_steps, evidence_signals_count
+        program_name: Bug bounty program name
+        payout_critical/high/medium/low: Program payout tiers ($)
+        bonus_active: Whether bonus is active
+        bonus_multiplier: Bonus multiplier value
+        managed: Whether managed/private program
+    """
+    metrics = get_metrics()
+    timer = get_timer()
+    total_hours = timer.total_hours
+
+    payouts = ProgramPayouts(
+        program_name=program_name,
+        payout_critical=payout_critical,
+        payout_high=payout_high,
+        payout_medium=payout_medium,
+        payout_low=payout_low,
+        bonus_active=bonus_active,
+        bonus_multiplier=bonus_multiplier,
+        managed=managed,
+    )
+
+    estimates: list[PricingEstimate] = []
+    for f in findings:
+        est = estimate_finding_value(
+            title=f.get("title", ""),
+            severity=Severity(f.get("severity", "medium").lower()),
+            confidence=Confidence(f.get("confidence", "tentative").lower()),
+            vuln_type=f.get("vuln_type", "xss"),
+            payouts=payouts,
+            has_poc=f.get("has_poc", False),
+            has_reproduction_steps=f.get("has_reproduction_steps", False),
+            evidence_signals_count=f.get("evidence_signals_count", 0),
+        )
+        estimates.append(est)
+
+    result = estimate_session_value(estimates, total_hours)
+    metrics.record_run("bounty_session_value")
+
+    # Add individual finding breakdowns
+    result["findings"] = [
+        {
+            "title": e.finding_title,
+            "severity": e.severity.value,
+            "expected_value": e.expected_value,
+            "readiness": e.readiness.value,
+        }
+        for e in estimates
+    ]
+    result["timer"] = timer.summary()
+
+    return result
+
+
+# ---------------------------------------------------------------------------
+# Discovery Timer
+# ---------------------------------------------------------------------------
+
+async def bounty_timer_start(phase: str) -> dict:
+    """Start timing a discovery phase.
+
+    Call at the beginning of each phase (recon, scanning, vuln_analysis, etc.)
+    to track time investment for ROI calculation.
+
+    Args:
+        phase: Phase name (recon, scanning, vulnerability_analysis, exploitation, reporting)
+    """
+    timer = get_timer()
+    timer.start_phase(phase)
+    return {
+        "status": "started",
+        "phase": phase,
+        "session_start": timer.session_start.isoformat(),
+        "active_hours_so_far": timer.total_hours,
+    }
+
+
+async def bounty_timer_tool(tool_name: str, target: str = "") -> dict:
+    """Record a tool execution within the current phase.
+
+    Call before running each tool to track per-tool timing.
+
+    Args:
+        tool_name: Name of the tool being executed
+        target: Target being tested
+    """
+    timer = get_timer()
+    timer.start_tool(tool_name, target)
+    return {
+        "status": "tracking",
+        "tool": tool_name,
+        "target": target,
+    }
+
+
+async def bounty_timer_stop() -> dict:
+    """Stop the current timer and get full timing summary.
+
+    Returns breakdown by phase and tool with ROI metrics.
+    """
+    timer = get_timer()
+    timer.end_phase()
+    return timer.summary()
+
+
+async def bounty_timer_reset() -> dict:
+    """Reset the timer for a new hunting session."""
+    timer = reset_timer()
+    return {
+        "status": "reset",
+        "session_start": timer.session_start.isoformat(),
+    }
