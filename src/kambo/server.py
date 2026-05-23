@@ -489,6 +489,36 @@ async def list_tools() -> list[Tool]:
         Tool(name="container_status", description="Check Kali container health status", inputSchema={
             "type": "object", "properties": {},
         }),
+        # Session Pipeline
+        Tool(name="pipeline_ingest", description="Ingest tool results into session pipeline for auto-chaining. Call after any recon/scan/vuln tool to accumulate context.", inputSchema={
+            "type": "object",
+            "properties": {
+                "tool_name": {"type": "string", "description": "Name of the tool that produced the result"},
+                "result": {"type": "object", "description": "The tool result to ingest"},
+            },
+            "required": ["tool_name", "result"],
+        }),
+        Tool(name="pipeline_status", description="Get accumulated session context — all discovered assets, tools run, findings", inputSchema={
+            "type": "object", "properties": {},
+        }),
+        Tool(name="pipeline_next", description="Get recommended next steps based on accumulated context — what tools to run and on what targets", inputSchema={
+            "type": "object",
+            "properties": {
+                "phase": {"type": "string", "enum": ["recon", "scanning", "vulnerability_analysis", "exploitation", "post_exploitation", "reporting"], "description": "Current phase"},
+                "max_steps": {"type": "integer", "description": "Max suggestions (default 5)"},
+            },
+            "required": ["phase"],
+        }),
+        Tool(name="pipeline_targets", description="Get auto-resolved targets for a phase based on accumulated recon/scan data", inputSchema={
+            "type": "object",
+            "properties": {
+                "phase": {"type": "string", "enum": ["recon", "scanning", "vulnerability_analysis", "exploitation", "post_exploitation", "reporting"]},
+            },
+            "required": ["phase"],
+        }),
+        Tool(name="pipeline_reset", description="Reset session pipeline for a new engagement", inputSchema={
+            "type": "object", "properties": {},
+        }),
     ]
 
 
@@ -497,6 +527,14 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
     """Route tool calls to implementations."""
     try:
         result = await _dispatch_tool(name, arguments)
+
+        # Auto-ingest results into pipeline for context accumulation
+        if isinstance(result, dict) and name not in ("pipeline_ingest", "pipeline_status", "pipeline_next", "pipeline_targets", "pipeline_reset", "set_scope", "container_status"):
+            from kambo.pipeline import get_pipeline
+            try:
+                get_pipeline().ingest(name, result)
+            except Exception:
+                pass  # pipeline ingestion should never block tool execution
 
         # Inject historical FP warning if available
         from kambo.metrics import flush_metrics, get_metrics
@@ -649,6 +687,43 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         return await bounty.bounty_timer_stop()
     if name == "bounty_timer_reset":
         return await bounty.bounty_timer_reset()
+
+    # Session Pipeline
+    if name == "pipeline_ingest":
+        from kambo.pipeline import get_pipeline
+        pipeline = get_pipeline()
+        new_assets = pipeline.ingest(args["tool_name"], args["result"])
+        return {
+            "ingested": len(new_assets),
+            "new_assets": [{"type": a.asset_type.value, "value": a.value} for a in new_assets[:20]],
+            "total_assets": len(pipeline.assets),
+        }
+    if name == "pipeline_status":
+        from kambo.pipeline import get_pipeline
+        return get_pipeline().summary()
+    if name == "pipeline_next":
+        from kambo.pipeline import get_pipeline
+        from kambo.models import Phase as P
+        pipeline = get_pipeline()
+        phase = P(args["phase"])
+        steps = pipeline.suggest_next_steps(phase, args.get("max_steps", 5))
+        return {
+            "phase": args["phase"],
+            "suggestions": [
+                {"tool": s.tool, "reason": s.reason, "targets": s.targets, "phase": s.phase.value}
+                for s in steps
+            ],
+        }
+    if name == "pipeline_targets":
+        from kambo.pipeline import get_pipeline
+        from kambo.models import Phase as P
+        pipeline = get_pipeline()
+        targets = pipeline.targets_for_phase(P(args["phase"]))
+        return {"phase": args["phase"], "targets": targets, "count": len(targets)}
+    if name == "pipeline_reset":
+        from kambo.pipeline import reset_pipeline
+        reset_pipeline()
+        return {"status": "pipeline_reset"}
 
     return {"error": f"Unknown tool: {name}"}
 
