@@ -133,6 +133,17 @@ def test_classify_skipped_stays_skipped() -> None:
     assert report.by_category("skipped")[0].nodeid == "t::a"
 
 
+def test_classify_new_skipped_test_is_skipped_not_failed() -> None:
+    # A test that did not exist in baseline AND is skipped in current run
+    # should be reported as skipped, never as failed.
+    current = {"t::a": CaseRecord("t::a", "skipped", 0.0)}
+    report = classify(current, baseline={})
+    assert report.by_category("skipped")[0].nodeid == "t::a"
+    assert report.by_category("failed") == []
+    assert report.exit_code == 0
+    assert report.verdicts[0].note == "no baseline entry"
+
+
 def test_classify_consistent_failure_is_not_regression() -> None:
     baseline = {"t::a": CaseRecord("t::a", "failed", 0.1)}
     current = {"t::a": CaseRecord("t::a", "failed", 0.1)}
@@ -220,6 +231,45 @@ def test_cli_promote_copies_current_to_baseline(tmp_path: Path) -> None:
     assert args.func(args) == 0
     assert base.exists()
     assert json.loads(base.read_text()) == json.loads(cur.read_text())
+
+
+def test_cli_analyze_returns_error_when_current_missing(tmp_path: Path) -> None:
+    md = tmp_path / "summary.md"
+    parser = build_parser()
+    args = parser.parse_args([
+        "analyze",
+        "--current", str(tmp_path / "missing.json"),
+        "--markdown", str(md),
+    ])
+    assert args.func(args) == 3
+    assert md.exists()
+    assert "current report missing" in md.read_text()
+
+
+def test_cli_analyze_returns_error_on_malformed_json(tmp_path: Path) -> None:
+    cur = tmp_path / "current.json"
+    cur.write_text("{not valid json")
+    md = tmp_path / "summary.md"
+    parser = build_parser()
+    args = parser.parse_args([
+        "analyze", "--current", str(cur), "--markdown", str(md),
+    ])
+    assert args.func(args) == 3
+    assert md.exists()
+    assert "failed to parse report" in md.read_text()
+
+
+def test_cli_analyze_returns_error_on_empty_report(tmp_path: Path) -> None:
+    cur = tmp_path / "current.json"
+    cur.write_text(json.dumps({"tests": []}))
+    md = tmp_path / "summary.md"
+    parser = build_parser()
+    args = parser.parse_args([
+        "analyze", "--current", str(cur), "--markdown", str(md),
+    ])
+    assert args.func(args) == 3
+    assert md.exists()
+    assert "empty current report" in md.read_text()
 
 
 def test_cli_promote_fails_when_current_missing(tmp_path: Path) -> None:

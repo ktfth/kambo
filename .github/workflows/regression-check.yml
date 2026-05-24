@@ -34,11 +34,23 @@ jobs:
           mkdir -p .reports
           pytest --json-report --json-report-file=.reports/current.json -q || true
 
+      - name: Verify pytest produced a valid report
+        run: |
+          if [ ! -f .reports/current.json ]; then
+            echo "::error::pytest did not produce .reports/current.json — likely a collection or plugin failure. Inspect the previous step's logs."
+            exit 1
+          fi
+          if ! python -c "import json,sys; data=json.load(open('.reports/current.json')); assert isinstance(data.get('tests'), list), 'tests key missing or not a list'" 2>err.log; then
+            echo "::error::.reports/current.json is not a valid pytest-json-report file:"
+            cat err.log
+            exit 1
+          fi
+
       - name: Re-run failed tests for flake detection
         run: |
           # Re-run only the tests that failed so we can detect flakes cheaply.
           python -c "
-          import json, pathlib, sys
+          import json, pathlib
           data = json.loads(pathlib.Path('.reports/current.json').read_text())
           ids = [t['nodeid'] for t in data.get('tests', []) if t.get('outcome') in ('failed','error')]
           pathlib.Path('.reports/failed-ids.txt').write_text('\n'.join(ids))
@@ -77,9 +89,19 @@ jobs:
             --rerun .reports/rerun.json \
             $baseline_arg \
             --markdown .reports/summary.md
-          echo "validator_exit=$?" >> "$GITHUB_OUTPUT"
+          validator_exit=$?
           set -e
-          cat .reports/summary.md >> "$GITHUB_STEP_SUMMARY"
+          echo "validator_exit=$validator_exit" >> "$GITHUB_OUTPUT"
+          if [ -f .reports/summary.md ]; then
+            cat .reports/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            # The validator should always emit summary.md (even on error),
+            # so this branch only fires if the validator itself crashed
+            # before reaching its error handler.
+            echo "::error::Regression validator did not emit .reports/summary.md (exit code: $validator_exit)"
+            echo "Regression validator crashed before producing a summary (exit code: $validator_exit)." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
 
       - name: Comment on PR
         if: github.event_name == 'pull_request'
@@ -97,8 +119,15 @@ jobs:
           retention-days: 14
 
       - name: Fail on real regression
-        # exit code 2 from the validator = regression detected
-        if: steps.analyze.outputs.validator_exit == '2'
+        # validator exit codes:
+        #   0 = clean (or only informational categories)
+        #   1 = pre-existing failures (don't block PR)
+        #   2 = regression detected
+        #   3 = validator tooling error (missing/corrupt report)
+        if: steps.analyze.outputs.validator_exit == '2' || steps.analyze.outputs.validator_exit == '3'
         run: |
-          echo "::error::Regression detected — see PR comment for details."
+          case "${{ steps.analyze.outputs.validator_exit }}" in
+            2) echo "::error::Regression detected — see PR comment for details." ;;
+            3) echo "::error::Regression validator encountered a tooling error — see step summary." ;;
+          esac
           exit 1

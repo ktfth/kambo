@@ -149,7 +149,7 @@ def classify(
 ) -> ValidationReport:
     """Apply the classification rules in priority order.
 
-    Priority: regression > flaky > recovered > new > failed > slow > passed.
+    Priority: flaky > regression > recovered > skipped > new > failed > slow > passed.
     Each test gets exactly one category.
     """
     rerun = rerun or {}
@@ -201,7 +201,20 @@ def classify(
             ))
             continue
 
-        # 4. New — not present in baseline
+        # 4. Skipped — independent of baseline presence
+        if cur.outcome == "skipped":
+            report.verdicts.append(CaseVerdict(
+                nodeid=nodeid,
+                category="skipped",
+                current_outcome=cur.outcome,
+                baseline_outcome=base.outcome if base else None,
+                current_duration=cur_dur,
+                baseline_duration=base_dur,
+                note="" if base else "no baseline entry",
+            ))
+            continue
+
+        # 5. New — not present in baseline
         if base is None:
             cat: Category = "new" if cur.outcome == "passed" else "failed"
             report.verdicts.append(CaseVerdict(
@@ -212,18 +225,6 @@ def classify(
                 current_duration=cur_dur,
                 baseline_duration=None,
                 note="no baseline entry",
-            ))
-            continue
-
-        # 5. Skipped passes straight through
-        if cur.outcome == "skipped":
-            report.verdicts.append(CaseVerdict(
-                nodeid=nodeid,
-                category="skipped",
-                current_outcome=cur.outcome,
-                baseline_outcome=base.outcome,
-                current_duration=cur_dur,
-                baseline_duration=base_dur,
             ))
             continue
 
@@ -372,10 +373,41 @@ def run_pytest(report_path: Path, extra_args: list[str] | None = None) -> int:
     return completed.returncode
 
 
+def _emit_error_markdown(path: str | None, title: str, detail: str) -> None:
+    """Write a minimal markdown error report so CI can still surface a message."""
+    if not path:
+        return
+    body = (
+        "## Regression validator\n\n"
+        f"**Error:** {title}\n\n"
+        "```\n"
+        f"{detail}\n"
+        "```\n"
+    )
+    Path(path).write_text(body)
+
+
 def _cmd_analyze(args: argparse.Namespace) -> int:
-    current = load_report(Path(args.current))
-    baseline = load_report(Path(args.baseline)) if args.baseline else {}
-    rerun = load_report(Path(args.rerun)) if args.rerun else {}
+    current_path = Path(args.current)
+    if not current_path.exists():
+        msg = f"current report not found: {current_path}"
+        print(msg, file=sys.stderr)
+        _emit_error_markdown(args.markdown, "current report missing", msg)
+        return 3
+    try:
+        current = load_report(current_path)
+        baseline = load_report(Path(args.baseline)) if args.baseline else {}
+        rerun = load_report(Path(args.rerun)) if args.rerun else {}
+    except (json.JSONDecodeError, OSError) as exc:
+        msg = f"failed to load report(s): {exc}"
+        print(msg, file=sys.stderr)
+        _emit_error_markdown(args.markdown, "failed to parse report", msg)
+        return 3
+    if not current:
+        msg = f"current report contains no tests: {current_path}"
+        print(msg, file=sys.stderr)
+        _emit_error_markdown(args.markdown, "empty current report", msg)
+        return 3
     report = classify(current, baseline, rerun)
     print(render_text(report))
     if args.markdown:
