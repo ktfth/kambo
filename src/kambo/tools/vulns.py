@@ -431,7 +431,7 @@ async def vuln_ssti(
     if engine != "auto":
         engine_map = {
             "jinja2": [("{{7*7}}", "49", "jinja2"), ("{{7*'7'}}", "7777777", "jinja2-python")],
-            "twig": [("{{7*7}}", "49", "twig"), ("{{7*'7'}}", "49math", "twig")],
+            "twig": [("{{7*7}}", "49", "twig")],
             "smarty": [("{$smarty.version}", "", "smarty"), ("{7*7}", "49", "smarty-math")],
             "velocity": [("${7*7}", "49", "velocity")],
         }

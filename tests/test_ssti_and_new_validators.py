@@ -89,6 +89,36 @@ class TestValidateSsti:
         # Error signal adds weight but not full confirmation without render
         assert chain.total_weight > 0
 
+    def test_payload_and_render_both_present_not_fp(self) -> None:
+        """Payload echoed literally AND render result present → not a FP.
+
+        The FP guard only fires when payload is present but expected_render is
+        absent. When both appear the template was rendered despite reflection.
+        """
+        chain = validate_ssti(
+            output="Your input: {{7*7}} was received; result: 49",
+            payload="{{7*7}}",
+            expected_render="49",
+        )
+        assert chain.total_weight > 0
+
+    def test_error_patterns_gated_by_error_based_flag(self) -> None:
+        """Spring/Twig error patterns only contribute weight when error_based=True."""
+        # Output has org.springframework but NOT the literal payload — no FP reflection guard
+        output = (
+            "org.springframework.expression.spel.SpelEvaluationException: "
+            "EL1004E: Method call: Method run() cannot be found"
+        )
+        chain_false = validate_ssti(
+            output=output, payload="${7*7}", expected_render="49", error_based=False
+        )
+        chain_true = validate_ssti(
+            output=output, payload="${7*7}", expected_render="49", error_based=True
+        )
+        assert chain_false.total_weight == 0          # gate is closed
+        assert chain_true.total_weight > 0            # gate opens the error signal
+        assert chain_true.total_weight >= chain_false.total_weight
+
 
 # ---------------------------------------------------------------------------
 # validate_prototype_pollution
@@ -140,6 +170,18 @@ class TestValidatePrototypePollution:
         chain = validate_prototype_pollution(
             output='{"user": "alice", "role": "user"}',
             injected_value="nonexistent",
+        )
+        assert chain.total_weight == 0
+
+    def test_injected_value_only_in_error_message_is_fp(self) -> None:
+        """Injected value inside an error message should not count as pollution.
+
+        The guard checks for error/invalid/rejected/blocked in the first 200
+        characters of the response before adding weight.
+        """
+        chain = validate_prototype_pollution(
+            output='{"error": "injected key polluted_value is invalid"}',
+            injected_value="polluted_value",
         )
         assert chain.total_weight == 0
 
@@ -220,3 +262,22 @@ class TestValidateDeserialization:
             payload_type="php",
         )
         assert chain.total_weight >= 1.0
+
+    def test_time_based_exactly_at_threshold_not_triggered(self) -> None:
+        """delay = 5300 - 300 = 5000 ms. The guard is '> 5000', so 5000 must NOT trigger."""
+        chain = validate_deserialization(
+            output="",
+            response_time_ms=5300,
+            baseline_time_ms=300,
+        )
+        assert chain.total_weight == 0
+
+    def test_time_based_just_over_threshold_triggers(self) -> None:
+        """delay = 5301 - 300 = 5001 ms > 5000 ms. Must trigger at weight 1.0."""
+        chain = validate_deserialization(
+            output="",
+            response_time_ms=5301,
+            baseline_time_ms=300,
+        )
+        assert chain.total_weight > 0
+        assert chain.confidence in (Confidence.TENTATIVE, Confidence.FIRM)

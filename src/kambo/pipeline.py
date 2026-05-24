@@ -298,19 +298,39 @@ def _parse_waf(result: dict) -> list[DiscoveredAsset]:
     return assets
 
 
+def _sans_to_subdomain_assets(
+    domains: list[str],
+    source_tool: str,
+    phase: Phase,
+    metadata: dict | None = None,
+) -> list[DiscoveredAsset]:
+    """Convert a SAN/domain list to SUBDOMAIN assets, excluding wildcards.
+
+    Centralises the filtering logic shared by certificate and TLS parsers so
+    future changes only need to be made in one place.
+    """
+    return [
+        DiscoveredAsset(
+            asset_type=AssetType.SUBDOMAIN,
+            value=d,
+            source_tool=source_tool,
+            phase=phase,
+            metadata=metadata or {},
+        )
+        for d in domains
+        if isinstance(d, str) and d and "*" not in d
+    ]
+
+
 @_register_parser("recon_certs")
 def _parse_certs(result: dict) -> list[DiscoveredAsset]:
-    assets = []
-    for domain in result.get("domains", result.get("sans", [])):
-        if isinstance(domain, str) and domain and "*" not in domain:
-            assets.append(DiscoveredAsset(
-                asset_type=AssetType.SUBDOMAIN,
-                value=domain,
-                source_tool="recon_certs",
-                phase=Phase.RECON,
-                metadata={"source": "certificate_transparency"},
-            ))
-    return assets
+    domains = result.get("domains", result.get("sans", []))
+    return _sans_to_subdomain_assets(
+        domains,
+        source_tool="recon_certs",
+        phase=Phase.RECON,
+        metadata={"source": "certificate_transparency"},
+    )
 
 
 @_register_parser("recon_asn")
@@ -341,15 +361,12 @@ def _parse_tls(result: dict) -> list[DiscoveredAsset]:
             phase=Phase.SCANNING,
             metadata={"target": target, "protocol": protocol},
         ))
-    # Extract certificate SANs as subdomains
-    for san in result.get("sans", []):
-        if isinstance(san, str) and san and "*" not in san:
-            assets.append(DiscoveredAsset(
-                asset_type=AssetType.SUBDOMAIN,
-                value=san,
-                source_tool="scan_tls",
-                phase=Phase.SCANNING,
-            ))
+    # Extract certificate SANs as subdomains — reuses _sans_to_subdomain_assets
+    assets.extend(_sans_to_subdomain_assets(
+        result.get("sans", []),
+        source_tool="scan_tls",
+        phase=Phase.SCANNING,
+    ))
     return assets
 
 

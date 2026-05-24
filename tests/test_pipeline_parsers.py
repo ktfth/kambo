@@ -125,6 +125,17 @@ class TestScanServicesParser:
         })
         assert any(a.asset_type == AssetType.PORT for a in assets)
 
+    def test_services_missing_port_or_service_are_ignored(self) -> None:
+        """Entries with only port or only service must produce no assets."""
+        p = fresh_pipeline()
+        assets = p.ingest("scan_services", {
+            "services": [
+                {"port": 80},         # service absent → port and service guard fails
+                {"service": "http"},  # port absent → guard fails
+            ],
+        })
+        assert assets == []
+
 
 class TestVulnSubdomainTakeoverParser:
     """The generic finding tracker handles vuln_subdomain_takeover results.
