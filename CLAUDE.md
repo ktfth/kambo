@@ -39,6 +39,7 @@ When the user's request matches an available skill, invoke it via the Skill tool
 | Visualize, diagram, mermaid, show progress | `/kambo-viz` |
 | Tutorial, teach, how to use, walkthrough | `/kambo-awake` |
 | Code review, check quality, review kambo | `/kambo-review` |
+| Confidence check, should I report, impact analysis, question findings | `/kambo-confidence` |
 
 ## Self-Improvement Loop
 
