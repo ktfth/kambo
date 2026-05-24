@@ -37,7 +37,7 @@ Com o Kambo:
 2. "faça um bug bounty completo"
 3. ☕ beba seu café
 
-O Claude executa as 5 fases, gradu os findings e gera o template HackerOne/Bugcrowd automaticamente.
+O Claude executa as 5 fases, gradua os findings e gera o template HackerOne/Bugcrowd automaticamente.
 ```
 
 ```

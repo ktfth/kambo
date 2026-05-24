@@ -2,51 +2,43 @@
 # =============================================================================
 # Kambo Social Media Scheduler
 # Exibe o post do dia às 18h00 no terminal (stdout / notificação)
+#
+# Requer: python3 (para leitura do posts-map.json e cálculo de datas)
 # =============================================================================
 
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 POSTS_DIR="$SCRIPT_DIR/posts"
-CALENDAR="$SCRIPT_DIR/calendar-30days.md"
+POSTS_MAP="$SCRIPT_DIR/posts-map.json"
 LOG_FILE="$SCRIPT_DIR/post-log.txt"
 REPO_URL="https://github.com/ktfth/kambo"
 
 # ─────────────────────────────────────────────────
-# Mapeamento dia → arquivo de post
+# Pré-requisito: python3
 # ─────────────────────────────────────────────────
-declare -A POST_MAP=(
-  [01]="twitter/dia-01-lancamento.md"
-  [02]="twitter/dia-02-problema.md"
-  [03]="linkedin/dia-03-solucao.md"
-  [04]="twitter/dia-04-arquitetura.md"
-  [05]="twitter/dia-05-instalacao.md"
-  [06]="linkedin/dia-06-claudecode.md"
-  [07]="twitter/dia-07-recap1.md"
-  [08]="twitter/dia-08-recon.md"
-  [09]="twitter/dia-09-scanning.md"
-  [10]="linkedin/dia-10-vulns.md"
-  [11]="twitter/dia-11-evidence.md"
-  [12]="linkedin/dia-12-api.md"
-  [13]="twitter/dia-13-cloud.md"
-  [14]="instagram/dia-14-recap2.md"
-  [15]="linkedin/dia-15-workflow.md"
-  [16]="twitter/dia-16-scope.md"
-  [17]="twitter/dia-17-cvss.md"
-  [18]="linkedin/dia-18-selfimprove.md"
-  [19]="twitter/dia-19-calibration.md"
-  [20]="twitter/dia-20-postexploit.md"
-  [21]="instagram/dia-21-recap3.md"
-  [22]="linkedin/dia-22-contribuir.md"
-  [23]="twitter/dia-23-tools.md"
-  [24]="twitter/dia-24-ctf.md"
-  [25]="twitter/dia-25-metrics.md"
-  [26]="linkedin/dia-26-report.md"
-  [27]="twitter/dia-27-tip-ssrf.md"
-  [28]="twitter/dia-28-tip-takeover.md"
-  [29]="linkedin/dia-29-roadmap.md"
-  [30]="twitter/dia-30-cta.md"
-)
+require_python3() {
+  if ! command -v python3 &>/dev/null; then
+    echo "❌ python3 é necessário mas não foi encontrado." >&2
+    echo "   Instale o Python 3.11+ e tente novamente." >&2
+    exit 1
+  fi
+}
+
+# ─────────────────────────────────────────────────
+# Lê o arquivo de post para um dado dia (1-30)
+# usando o posts-map.json como fonte única
+# ─────────────────────────────────────────────────
+get_post_file() {
+  local day_num="$1"
+  python3 - "$day_num" "$POSTS_MAP" <<'PYEOF'
+import json, sys
+day = int(sys.argv[1])
+with open(sys.argv[2]) as f:
+    m = json.load(f)
+print(m.get(str(day), ""))
+PYEOF
+}
 
 # ─────────────────────────────────────────────────
 # Funções auxiliares
@@ -74,61 +66,55 @@ EOF
 }
 
 get_day_number() {
-  # Calcula o dia do ciclo (1-30) baseado na data atual
-  # Você pode definir uma data de início alterando START_DATE
-  START_DATE="${KAMBO_START_DATE:-$(date +%Y-%m-%d)}"
+  require_python3
 
-  # Se o arquivo .start-date existir, usa como referência
+  local start_date="${KAMBO_START_DATE:-}"
+
   if [[ -f "$SCRIPT_DIR/.start-date" ]]; then
-    START_DATE=$(cat "$SCRIPT_DIR/.start-date")
-  else
-    # Primeira execução: salva a data de início
-    echo "$START_DATE" > "$SCRIPT_DIR/.start-date"
+    start_date=$(cat "$SCRIPT_DIR/.start-date")
+  elif [[ -z "$start_date" ]]; then
+    start_date=$(date +%Y-%m-%d)
+    echo "$start_date" > "$SCRIPT_DIR/.start-date"
   fi
 
-  TODAY=$(date +%Y-%m-%d)
+  local today
+  today=$(date +%Y-%m-%d)
 
-  # Calcula diferença em dias
-  if command -v python3 &>/dev/null; then
-    DIFF=$(python3 -c "from datetime import date; print((date.fromisoformat('$TODAY') - date.fromisoformat('$START_DATE')).days)")
-  else
-    # Fallback: usa date aritmética do sistema
-    DIFF=$(( ($(date -d "$TODAY" +%s) - $(date -d "$START_DATE" +%s)) / 86400 ))
-  fi
+  # python3 é portável em Linux e macOS (sem GNU date -d)
+  local diff
+  diff=$(python3 -c "
+from datetime import date
+print((date.fromisoformat('$today') - date.fromisoformat('$start_date')).days)
+")
 
-  # Ciclo de 30 dias (0-indexed → 1-indexed, loop)
-  DAY_NUM=$(( (DIFF % 30) + 1 ))
-  printf "%02d" "$DAY_NUM"
+  printf "%02d" "$(( (diff % 30) + 1 ))"
 }
 
 show_post() {
+  require_python3
+
   local day_num
   day_num=$(printf "%02d" "$1")
 
-  local post_file="${POST_MAP[$day_num]:-}"
+  local post_file
+  post_file=$(get_post_file "$((10#$day_num))")
 
   if [[ -z "$post_file" ]]; then
-    echo "❌ Dia $day_num não encontrado no mapa de posts."
+    echo "❌ Dia $day_num não encontrado em $POSTS_MAP."
     exit 1
   fi
 
   local full_path="$POSTS_DIR/$post_file"
-
   if [[ ! -f "$full_path" ]]; then
     echo "❌ Arquivo não encontrado: $full_path"
     exit 1
   fi
 
-  # Detecta a plataforma pelo caminho
   local platform
-  if [[ "$post_file" == twitter/* ]]; then
-    platform="🐦 TWITTER / X"
-  elif [[ "$post_file" == linkedin/* ]]; then
-    platform="💼 LINKEDIN"
-  elif [[ "$post_file" == instagram/* ]]; then
-    platform="📸 INSTAGRAM"
-  else
-    platform="📣 SOCIAL MEDIA"
+  if [[ "$post_file" == twitter/* ]];   then platform="🐦 TWITTER / X"
+  elif [[ "$post_file" == linkedin/* ]]; then platform="💼 LINKEDIN"
+  elif [[ "$post_file" == instagram/* ]]; then platform="📸 INSTAGRAM"
+  else platform="📣 SOCIAL MEDIA"
   fi
 
   echo ""
@@ -144,52 +130,47 @@ show_post() {
   echo "📁 Arquivo: social-media/$post_file"
   echo "─────────────────────────────────────────────────────────────"
 
-  # Registra no log
   echo "$(date '+%Y-%m-%d %H:%M:%S') | Dia $day_num | $platform | $post_file" >> "$LOG_FILE"
 }
 
 list_posts() {
+  require_python3
+
   echo ""
   echo "📅 Posts disponíveis (30 dias):"
   echo ""
-  for i in $(seq 1 30); do
-    day_num=$(printf "%02d" "$i")
-    post_file="${POST_MAP[$day_num]:-N/A}"
 
-    if [[ "$post_file" == twitter/* ]]; then
-      icon="🐦"
-    elif [[ "$post_file" == linkedin/* ]]; then
-      icon="💼"
-    elif [[ "$post_file" == instagram/* ]]; then
-      icon="📸"
-    else
-      icon="❓"
-    fi
+  python3 - "$POSTS_DIR" "$POSTS_MAP" <<'PYEOF'
+import json, sys
+from pathlib import Path
 
-    # Verifica se o arquivo existe
-    if [[ -f "$POSTS_DIR/$post_file" ]]; then
-      status="✅"
-    else
-      status="❌"
-    fi
+posts_dir = Path(sys.argv[1])
+with open(sys.argv[2]) as f:
+    post_map = json.load(f)
 
-    echo "  Dia $day_num: $status $icon $post_file"
-  done
+for day in range(1, 31):
+    path = post_map.get(str(day), "N/A")
+    status = "✅" if (posts_dir / path).exists() else "❌"
+    if "twitter"   in path: icon = "🐦"
+    elif "linkedin"  in path: icon = "💼"
+    elif "instagram" in path: icon = "📸"
+    else: icon = "❓"
+    print(f"  Dia {day:02d}: {status} {icon} {path}")
+PYEOF
+
   echo ""
 }
 
 install_cron() {
   local cron_cmd="0 18 * * * cd $SCRIPT_DIR && bash $SCRIPT_DIR/schedule.sh today >> $LOG_FILE 2>&1"
 
-  # Verifica se já existe
-  if crontab -l 2>/dev/null | grep -q "kambo.*schedule.sh"; then
+  if crontab -l 2>/dev/null | grep -q "# KamboSocialPoster"; then
     echo "⚠️  Cron job do Kambo já está instalado."
     echo "Use '$0 status' para verificar."
     return 0
   fi
 
-  # Adiciona ao crontab
-  (crontab -l 2>/dev/null || true; echo "$cron_cmd") | crontab -
+  (crontab -l 2>/dev/null || true; echo "# KamboSocialPoster"; echo "$cron_cmd") | crontab -
 
   echo "✅ Cron job instalado com sucesso!"
   echo ""
@@ -201,12 +182,18 @@ install_cron() {
 }
 
 uninstall_cron() {
-  if ! crontab -l 2>/dev/null | grep -q "kambo.*schedule.sh"; then
+  if ! crontab -l 2>/dev/null | grep -q "# KamboSocialPoster"; then
     echo "ℹ️  Nenhum cron job do Kambo encontrado."
     return 0
   fi
 
-  crontab -l 2>/dev/null | grep -v "kambo.*schedule.sh" | crontab -
+  # Remove o marcador '# KamboSocialPoster' e a linha imediatamente seguinte
+  crontab -l 2>/dev/null | awk '
+    /# KamboSocialPoster/ { skip=1; next }
+    skip { skip=0; next }
+    { print }
+  ' | crontab -
+
   echo "✅ Cron job removido com sucesso."
 }
 
@@ -215,7 +202,7 @@ show_status() {
   echo "📊 Status do Kambo Social Scheduler"
   echo "────────────────────────────────────"
 
-  if crontab -l 2>/dev/null | grep -q "kambo.*schedule.sh"; then
+  if crontab -l 2>/dev/null | grep -q "# KamboSocialPoster"; then
     echo "🟢 Cron job: ATIVO (18h00 diário)"
   else
     echo "🔴 Cron job: INATIVO"
@@ -248,7 +235,6 @@ show_status() {
 # ─────────────────────────────────────────────────
 # Main
 # ─────────────────────────────────────────────────
-
 case "${1:-help}" in
   today)
     day=$(get_day_number)
@@ -261,21 +247,11 @@ case "${1:-help}" in
     fi
     show_post "${2}"
     ;;
-  list)
-    list_posts
-    ;;
-  install)
-    install_cron
-    ;;
-  uninstall)
-    uninstall_cron
-    ;;
-  status)
-    show_status
-    ;;
-  help|--help|-h)
-    show_help
-    ;;
+  list)      list_posts ;;
+  install)   install_cron ;;
+  uninstall) uninstall_cron ;;
+  status)    show_status ;;
+  help|--help|-h) show_help ;;
   *)
     echo "❌ Comando desconhecido: ${1}"
     show_help

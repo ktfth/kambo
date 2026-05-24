@@ -34,5 +34,5 @@ O Kambo detecta isso em segundos.
 
 🔗 github.com/ktfth/kambo
 
-#APISecuriy #OWASP #BugBounty #CyberSecurity #BOLA #BFLA #PenetrationTesting #WebSecurity #EthicalHacking
+#APISecurity #OWASP #BugBounty #CyberSecurity #BOLA #BFLA #PenetrationTesting #WebSecurity #EthicalHacking
 ```

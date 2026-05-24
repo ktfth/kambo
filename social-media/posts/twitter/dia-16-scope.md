@@ -44,7 +44,7 @@ Com o Kambo, o Claude simplesmente não consegue executar ferramentas em targets
 ```
 
 ```
-Bonus: o log de auditoria em SQLite registra:
+Bônus: o log de auditoria em SQLite registra:
 • Cada ferramenta executada
 • O target testado
 • O timestamp

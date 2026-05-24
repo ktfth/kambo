@@ -33,42 +33,16 @@ Se a última entrada tiver o timestamp de hoje, pergunte ao usuário se quer pub
 
 ## Passo 2 — Carregar e exibir o post
 
-Mapeamento dia → arquivo (relativo à raiz do projeto):
+Leia o mapa centralizado de posts:
 
 ```
-1  → social-media/posts/twitter/dia-01-lancamento.md
-2  → social-media/posts/twitter/dia-02-problema.md
-3  → social-media/posts/linkedin/dia-03-solucao.md
-4  → social-media/posts/twitter/dia-04-arquitetura.md
-5  → social-media/posts/twitter/dia-05-instalacao.md
-6  → social-media/posts/linkedin/dia-06-claudecode.md
-7  → social-media/posts/twitter/dia-07-recap1.md
-8  → social-media/posts/twitter/dia-08-recon.md
-9  → social-media/posts/twitter/dia-09-scanning.md
-10 → social-media/posts/linkedin/dia-10-vulns.md
-11 → social-media/posts/twitter/dia-11-evidence.md
-12 → social-media/posts/linkedin/dia-12-api.md
-13 → social-media/posts/twitter/dia-13-cloud.md
-14 → social-media/posts/instagram/dia-14-recap2.md
-15 → social-media/posts/linkedin/dia-15-workflow.md
-16 → social-media/posts/twitter/dia-16-scope.md
-17 → social-media/posts/twitter/dia-17-cvss.md
-18 → social-media/posts/linkedin/dia-18-selfimprove.md
-19 → social-media/posts/twitter/dia-19-calibration.md
-20 → social-media/posts/twitter/dia-20-postexploit.md
-21 → social-media/posts/instagram/dia-21-recap3.md
-22 → social-media/posts/linkedin/dia-22-contribuir.md
-23 → social-media/posts/twitter/dia-23-tools.md
-24 → social-media/posts/twitter/dia-24-ctf.md
-25 → social-media/posts/twitter/dia-25-metrics.md
-26 → social-media/posts/linkedin/dia-26-report.md
-27 → social-media/posts/twitter/dia-27-tip-ssrf.md
-28 → social-media/posts/twitter/dia-28-tip-takeover.md
-29 → social-media/posts/linkedin/dia-29-roadmap.md
-30 → social-media/posts/twitter/dia-30-cta.md
+Read: social-media/posts-map.json
 ```
 
-Leia o arquivo. Extraia o conteúdo do **primeiro bloco de código** (entre o primeiro par de ` ``` `). Esse é o texto pronto para publicar.
+Este arquivo contém `{ "1": "caminho/relativo.md", ..., "30": "..." }`.
+Use a chave correspondente ao dia calculado no Passo 1 para obter o caminho do arquivo.
+
+Leia o arquivo em `social-media/posts/<caminho>`. Extraia o conteúdo do **primeiro bloco de código** (entre o primeiro par de ` ``` `). Esse é o texto pronto para publicar.
 
 Exiba para o usuário:
 ```

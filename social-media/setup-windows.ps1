@@ -106,7 +106,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Host ""
 Write-Host "⚙️  Configurando .env..." -ForegroundColor Cyan
 
-$envFile = Join-Path $ScriptDir ".env"
+$envFile    = Join-Path $ScriptDir ".env"
 $envExample = Join-Path $ScriptDir ".env.example"
 
 if (-not (Test-Path $envFile)) {
@@ -119,7 +119,9 @@ if (-not (Test-Path $envFile)) {
 }
 
 # ─────────────────────────────────────────────────
-# 6. Detectar perfil do Chrome
+# 6. Detectar e gravar perfil do Chrome no .env
+# Processa o arquivo linha a linha para substituir apenas
+# a entrada CHROME_PROFILE_DIR sem afetar outras linhas.
 # ─────────────────────────────────────────────────
 Write-Host ""
 Write-Host "🔍 Detectando perfil do Chrome..." -ForegroundColor Cyan
@@ -128,13 +130,23 @@ $chromeProfileDir = "$env:LOCALAPPDATA\Google\Chrome\User Data"
 if (Test-Path $chromeProfileDir) {
     Write-Host "✅ Perfil encontrado: $chromeProfileDir" -ForegroundColor Green
 
-    # Atualiza .env com o caminho do perfil
-    $envContent = Get-Content $envFile -Raw
-    if ($envContent -match "CHROME_PROFILE_DIR=`$") {
-        $envContent = $envContent -replace "CHROME_PROFILE_DIR=", "CHROME_PROFILE_DIR=$chromeProfileDir"
-        Set-Content $envFile $envContent -NoNewline
-        Write-Host "   Caminho adicionado ao .env automaticamente." -ForegroundColor Green
+    $lines   = Get-Content $envFile
+    $updated = $false
+    $newLines = foreach ($line in $lines) {
+        if ($line -match '^CHROME_PROFILE_DIR=\s*$') {
+            "CHROME_PROFILE_DIR=$chromeProfileDir"
+            $updated = $true
+        } else {
+            $line
+        }
     }
+    # Adiciona a variável se não existia no arquivo
+    if (-not $updated) {
+        $newLines = @($newLines) + "CHROME_PROFILE_DIR=$chromeProfileDir"
+    }
+    # Preserva a quebra de linha final (Set-Content adiciona newline por padrão)
+    $newLines | Set-Content $envFile
+    Write-Host "   Caminho adicionado ao .env automaticamente." -ForegroundColor Green
 } else {
     Write-Host "⚠️  Perfil do Chrome não encontrado em $chromeProfileDir" -ForegroundColor Yellow
     Write-Host "   Defina CHROME_PROFILE_DIR no arquivo .env manualmente."
@@ -150,13 +162,11 @@ if ($installTask.ToLower() -eq "s") {
     Write-Host "📅 Instalando Task Scheduler..." -ForegroundColor Cyan
 
     $posterScript = Join-Path $ScriptDir "poster.py"
-    $taskName = "KamboSocialPoster"
-    $logFile = Join-Path $ScriptDir "post-log.jsonl"
+    $taskName     = "KamboSocialPoster"
 
     # Remove task existente
     schtasks /Delete /TN $taskName /F 2>$null
 
-    # Cria a task
     $action = New-ScheduledTaskAction `
         -Execute $pythonCmd `
         -Argument "`"$posterScript`" today" `
@@ -187,13 +197,13 @@ if ($installTask.ToLower() -eq "s") {
     Write-Host "   Publica todo dia às 18h00" -ForegroundColor Green
     Write-Host ""
     Write-Host "   Comandos úteis:"
-    Write-Host "   Verificar: schtasks /Query /TN $taskName /FO LIST"
+    Write-Host "   Verificar:      schtasks /Query /TN $taskName /FO LIST"
     Write-Host "   Executar agora: schtasks /Run /TN $taskName"
-    Write-Host "   Remover: python `"$posterScript`" schedule uninstall"
+    Write-Host "   Remover:        python `"$posterScript`" schedule uninstall"
 }
 
 # ─────────────────────────────────────────────────
-# 8. Teste rápido
+# 8. Teste rápido (dry-run)
 # ─────────────────────────────────────────────────
 Write-Host ""
 $runTest = Read-Host "🧪 Deseja visualizar o post de hoje (dry-run)? (s/N)"
@@ -219,7 +229,7 @@ Write-Host "  1. Abra o Chrome e faça login em threads.net"
 Write-Host "     (o poster usará essa sessão existente)"
 Write-Host ""
 Write-Host "  2. Edite o .env se necessário:"
-Write-Host "     notepad `"$(Join-Path $ScriptDir ".env")`""
+Write-Host "     notepad `"$envFile`""
 Write-Host ""
 Write-Host "  3. Teste a publicação:"
 Write-Host "     python `"$(Join-Path $ScriptDir "poster.py")`" today --dry-run"

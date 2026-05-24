@@ -48,7 +48,7 @@ Taxa de aceitação muito maior. 💰
 ```
 
 ```
-O model de confiança é configurável.
+O modelo de confiança é configurável.
 
 Você pode calibrar os thresholds via /kambo-calibrate baseado no seu histórico de reports aceitos/rejeitados.
 

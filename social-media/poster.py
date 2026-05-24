@@ -11,8 +11,8 @@ Uso:
   python poster.py setup               # Configura .env interativamente
 
 Agendamento:
-  Windows: python poster.py schedule install
-  Linux/macOS: python poster.py schedule install
+  Windows:      python poster.py schedule install
+  Linux/macOS:  python poster.py schedule install
 """
 
 from __future__ import annotations
@@ -28,7 +28,6 @@ import subprocess
 import sys
 from datetime import date, datetime
 from pathlib import Path
-from typing import Optional
 
 # Carrega .env se existir
 try:
@@ -48,39 +47,11 @@ LOG_FILE = BASE_DIR / "post-log.jsonl"
 START_DATE_FILE = BASE_DIR / ".start-date"
 REPO_URL = os.getenv("REPO_URL", "https://github.com/ktfth/kambo")
 
-# Mapa dia (1-30) → arquivo de post relativo a POSTS_DIR
-POST_MAP: dict[int, str] = {
-    1: "twitter/dia-01-lancamento.md",
-    2: "twitter/dia-02-problema.md",
-    3: "linkedin/dia-03-solucao.md",
-    4: "twitter/dia-04-arquitetura.md",
-    5: "twitter/dia-05-instalacao.md",
-    6: "linkedin/dia-06-claudecode.md",
-    7: "twitter/dia-07-recap1.md",
-    8: "twitter/dia-08-recon.md",
-    9: "twitter/dia-09-scanning.md",
-    10: "linkedin/dia-10-vulns.md",
-    11: "twitter/dia-11-evidence.md",
-    12: "linkedin/dia-12-api.md",
-    13: "twitter/dia-13-cloud.md",
-    14: "instagram/dia-14-recap2.md",
-    15: "linkedin/dia-15-workflow.md",
-    16: "twitter/dia-16-scope.md",
-    17: "twitter/dia-17-cvss.md",
-    18: "linkedin/dia-18-selfimprove.md",
-    19: "twitter/dia-19-calibration.md",
-    20: "twitter/dia-20-postexploit.md",
-    21: "instagram/dia-21-recap3.md",
-    22: "linkedin/dia-22-contribuir.md",
-    23: "twitter/dia-23-tools.md",
-    24: "twitter/dia-24-ctf.md",
-    25: "twitter/dia-25-metrics.md",
-    26: "linkedin/dia-26-report.md",
-    27: "twitter/dia-27-tip-ssrf.md",
-    28: "twitter/dia-28-tip-takeover.md",
-    29: "linkedin/dia-29-roadmap.md",
-    30: "twitter/dia-30-cta.md",
-}
+# Mapa dia (1-30) → arquivo de post relativo a POSTS_DIR.
+# Fonte única de verdade: posts-map.json. Não edite aqui.
+_MAP_FILE = BASE_DIR / "posts-map.json"
+with _MAP_FILE.open(encoding="utf-8") as _f:
+    POST_MAP: dict[int, str] = {int(k): v for k, v in json.load(_f).items()}
 
 
 # ─────────────────────────────────────────────────
@@ -112,13 +83,13 @@ def get_cycle_day() -> int:
 # ─────────────────────────────────────────────────
 def extract_post_text(markdown_path: Path) -> str:
     """
-    Extrai o texto do primeiro bloco de código ```...``` do arquivo.
-    Esse bloco contém o texto limpo pronto para publicar.
+    Extrai o texto do primeiro bloco de código do arquivo.
+    Suporta language tags (```txt, ```python …) e line-endings CRLF.
     """
     content = markdown_path.read_text(encoding="utf-8")
 
-    # Procura blocos de código: ```\n...\n```
-    pattern = re.compile(r"```\n(.*?)\n```", re.DOTALL)
+    # Aceita fence com tag de linguagem opcional e CRLF ou LF
+    pattern = re.compile(r"```[^\r\n]*\r?\n(.*?)\r?\n```", re.DOTALL)
     matches = pattern.findall(content)
 
     if not matches:
@@ -180,7 +151,6 @@ async def publish_day(day: int, dry_run: bool = False) -> None:
     text = extract_post_text(full_path)
     platform_label = get_platform_label(post_path)
 
-    # ── Exibe o post ──────────────────────────────
     separator = "─" * 60
     print(f"\n{separator}")
     print(f"🐸 KAMBO — Dia {day:02d}/30 | {datetime.now().strftime('%d/%m/%Y %H:%M')}")
@@ -195,14 +165,13 @@ async def publish_day(day: int, dry_run: bool = False) -> None:
         print("🔍 Modo dry-run: post NÃO foi publicado.")
         return
 
-    # ── Publica no Threads ────────────────────────
     try:
         from threads_client import publish_to_threads
 
         result = await publish_to_threads(text)
 
         if result["success"]:
-            print(f"✅ Publicado com sucesso no Threads!")
+            print("✅ Publicado com sucesso no Threads!")
             if result.get("url"):
                 print(f"   URL: {result['url']}")
             if result.get("screenshot"):
@@ -241,7 +210,6 @@ def run_setup() -> None:
             print("Configuração cancelada.")
             return
 
-    # Copia o exemplo como base
     shutil.copy(example_path, env_path)
 
     print("\nEscolha o modo de publicação:")
@@ -251,62 +219,57 @@ def run_setup() -> None:
     mode = "browser" if mode_choice != "2" else "api"
 
     lines = env_path.read_text().splitlines()
-    new_lines = []
-
-    for line in lines:
-        if line.startswith("POSTER_MODE="):
-            line = f"POSTER_MODE={mode}"
-        new_lines.append(line)
+    new_lines = [
+        f"POSTER_MODE={mode}" if line.startswith("POSTER_MODE=") else line
+        for line in lines
+    ]
 
     if mode == "api":
         user_id = input("THREADS_USER_ID: ").strip()
         token = input("THREADS_ACCESS_TOKEN: ").strip()
-        new_lines2 = []
-        for line in new_lines:
-            if line.startswith("THREADS_USER_ID="):
-                line = f"THREADS_USER_ID={user_id}"
-            elif line.startswith("THREADS_ACCESS_TOKEN="):
-                line = f"THREADS_ACCESS_TOKEN={token}"
-            new_lines2.append(line)
-        new_lines = new_lines2
+        new_lines = [
+            f"THREADS_USER_ID={user_id}" if line.startswith("THREADS_USER_ID=")
+            else f"THREADS_ACCESS_TOKEN={token}" if line.startswith("THREADS_ACCESS_TOKEN=")
+            else line
+            for line in new_lines
+        ]
 
     env_path.write_text("\n".join(new_lines))
-
     print(f"\n✅ .env criado em: {env_path}")
-    print("\nPróximo passo:")
+
     if mode == "browser":
-        print("  1. Instale as dependências:  pip install -r requirements-social.txt")
-        print("  2. Instale o Chrome do Playwright: playwright install chrome")
-        print("  3. Teste: python poster.py today --dry-run")
-        print("  4. Publique: python poster.py today")
+        print("\nPróximos passos:")
+        print("  1. pip install -r requirements-social.txt")
+        print("  2. playwright install chrome")
+        print("  3. python poster.py today --dry-run")
     else:
-        print("  1. Instale as dependências: pip install -r requirements-social.txt")
-        print("  2. Teste: python poster.py today --dry-run")
-        print("  3. Publique: python poster.py today")
+        print("\nPróximos passos:")
+        print("  1. pip install -r requirements-social.txt")
+        print("  2. python poster.py today --dry-run")
 
 
 # ─────────────────────────────────────────────────
-# Agendamento
+# Agendamento — Windows
 # ─────────────────────────────────────────────────
 def schedule_windows_install() -> None:
     """Instala o agendamento no Windows Task Scheduler (18h diário)."""
-    script = Path(__file__).resolve()
-    python = sys.executable
-    task_name = "KamboSocialPoster"
-    working_dir = str(BASE_DIR)
-
-    # Verifica se schtasks está disponível
     if not shutil.which("schtasks"):
         print("❌ schtasks não encontrado. Certifique-se de estar no Windows.")
         sys.exit(1)
 
-    # Remove task existente (ignora erro se não existe)
+    # sys.executable e Path(__file__) são caminhos de sistema confiáveis,
+    # não controláveis por entrada do usuário — sem risco de injeção.
+    script = Path(__file__).resolve()
+    python = sys.executable
+    task_name = "KamboSocialPoster"
+
     subprocess.run(
         ["schtasks", "/Delete", "/TN", task_name, "/F"],
         capture_output=True,
     )
 
-    # Cria nova task
+    # subprocess.run com lista não usa shell; /TR é construído de caminhos
+    # provenientes de sys.executable e __file__ (não de input do usuário).
     cmd = [
         "schtasks", "/Create",
         "/TN", task_name,
@@ -316,15 +279,14 @@ def schedule_windows_install() -> None:
         "/RL", "HIGHEST",
         "/F",
     ]
-
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode == 0:
         print(f"✅ Task Scheduler configurado: {task_name}")
-        print(f"   Executa todo dia às 18h00")
+        print("   Executa todo dia às 18h00")
         print(f"   Script: {script}")
         print(f"\nPara verificar: schtasks /Query /TN {task_name}")
-        print(f"Para remover:   python poster.py schedule uninstall")
+        print("Para remover:   python poster.py schedule uninstall")
     else:
         print(f"❌ Erro ao criar task: {result.stderr}")
         print("   Tente executar o terminal como Administrador.")
@@ -342,20 +304,22 @@ def schedule_windows_uninstall() -> None:
     if result.returncode == 0:
         print(f"✅ Task '{task_name}' removida do Task Scheduler.")
     else:
-        print(f"ℹ️  Task não encontrada ou já removida.")
+        print("ℹ️  Task não encontrada ou já removida.")
 
 
+# ─────────────────────────────────────────────────
+# Agendamento — Unix (Linux / macOS)
+# ─────────────────────────────────────────────────
 def schedule_unix_install() -> None:
     """Instala o cron job (Linux/macOS) para executar às 18h."""
     script = Path(__file__).resolve()
     python = sys.executable
     cron_line = f"0 18 * * * cd {BASE_DIR} && {python} {script} today >> {LOG_FILE} 2>&1"
 
-    # Lê crontab atual
     result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     current = result.stdout if result.returncode == 0 else ""
 
-    if "KamboSocialPoster" in current or str(script) in current:
+    if "KamboSocialPoster" in current:
         print("⚠️  Cron job já está instalado.")
         return
 
@@ -363,27 +327,39 @@ def schedule_unix_install() -> None:
     proc = subprocess.run(["crontab", "-"], input=new_crontab, text=True, capture_output=True)
 
     if proc.returncode == 0:
-        print(f"✅ Cron job instalado: 18h00 diário")
+        print("✅ Cron job instalado: 18h00 diário")
         print(f"   Script: {script}")
         print(f"   Log: {LOG_FILE}")
-        print(f"\nPara verificar: crontab -l")
-        print(f"Para remover:   python poster.py schedule uninstall")
+        print("\nPara verificar: crontab -l")
+        print("Para remover:   python poster.py schedule uninstall")
     else:
         print(f"❌ Erro ao instalar cron: {proc.stderr}")
 
 
 def schedule_unix_uninstall() -> None:
-    """Remove o cron job do Linux/macOS."""
+    """Remove o cron job do Linux/macOS.
+
+    Remove apenas as linhas marcadas com '# KamboSocialPoster' e a linha
+    imediatamente seguinte (o cron entry), evitando apagar jobs não relacionados.
+    """
     result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     if result.returncode != 0:
         print("ℹ️  Nenhum crontab encontrado.")
         return
 
-    lines = [
-        l for l in result.stdout.splitlines()
-        if "KamboSocialPoster" not in l and "poster.py" not in l
-    ]
-    new_crontab = "\n".join(lines) + "\n"
+    lines = result.stdout.splitlines()
+    new_lines: list[str] = []
+    skip_next = False
+    for line in lines:
+        if skip_next:
+            skip_next = False
+            continue
+        if "# KamboSocialPoster" in line:
+            skip_next = True  # pula também a próxima linha (o cron entry)
+            continue
+        new_lines.append(line)
+
+    new_crontab = "\n".join(new_lines) + "\n"
     subprocess.run(["crontab", "-"], input=new_crontab, text=True)
     print("✅ Cron job removido.")
 
@@ -412,13 +388,12 @@ def schedule_status() -> None:
             print("   Execute: python poster.py schedule install")
     else:
         result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
-        if result.returncode == 0 and "poster.py" in result.stdout:
+        if result.returncode == 0 and "KamboSocialPoster" in result.stdout:
             print("🟢 Cron job: ATIVO (18h00 diário)")
         else:
             print("🔴 Cron job: INATIVO")
             print("   Execute: python poster.py schedule install")
 
-    # Últimas publicações
     print()
     if LOG_FILE.exists():
         print("📝 Últimas 5 publicações:")
@@ -443,11 +418,12 @@ def schedule_status() -> None:
 # ─────────────────────────────────────────────────
 def list_posts() -> None:
     print("\n📅 Posts disponíveis (30 dias):\n")
+    today_day = get_cycle_day()
     for day, path in POST_MAP.items():
         full = POSTS_DIR / path
         status = "✅" if full.exists() else "❌"
         label = get_platform_label(path)
-        marker = " ← HOJE" if day == get_cycle_day() else ""
+        marker = " ← HOJE" if day == today_day else ""
         print(f"  Dia {day:02d}: {status} {label:<20} {path}{marker}")
     print()
 
@@ -474,26 +450,16 @@ Exemplos:
 
     subparsers = parser.add_subparsers(dest="command")
 
-    # today
     p_today = subparsers.add_parser("today", help="Publica o post de hoje")
-    p_today.add_argument(
-        "--dry-run", action="store_true", help="Exibe sem publicar"
-    )
+    p_today.add_argument("--dry-run", action="store_true", help="Exibe sem publicar")
 
-    # day N
     p_day = subparsers.add_parser("day", help="Publica o post do dia N")
     p_day.add_argument("n", type=int, help="Número do dia (1-30)")
-    p_day.add_argument(
-        "--dry-run", action="store_true", help="Exibe sem publicar"
-    )
+    p_day.add_argument("--dry-run", action="store_true", help="Exibe sem publicar")
 
-    # list
     subparsers.add_parser("list", help="Lista todos os posts disponíveis")
-
-    # setup
     subparsers.add_parser("setup", help="Configura o .env interativamente")
 
-    # schedule
     p_sched = subparsers.add_parser("schedule", help="Gerencia o agendamento")
     p_sched.add_argument(
         "action",
@@ -508,30 +474,19 @@ Exemplos:
         return
 
     if args.command == "today":
-        day = get_cycle_day()
-        asyncio.run(publish_day(day, dry_run=args.dry_run))
-
+        asyncio.run(publish_day(get_cycle_day(), dry_run=args.dry_run))
     elif args.command == "day":
         asyncio.run(publish_day(args.n, dry_run=args.dry_run))
-
     elif args.command == "list":
         list_posts()
-
     elif args.command == "setup":
         run_setup()
-
     elif args.command == "schedule":
         system = platform.system()
         if args.action == "install":
-            if system == "Windows":
-                schedule_windows_install()
-            else:
-                schedule_unix_install()
+            schedule_windows_install() if system == "Windows" else schedule_unix_install()
         elif args.action == "uninstall":
-            if system == "Windows":
-                schedule_windows_uninstall()
-            else:
-                schedule_unix_uninstall()
+            schedule_windows_uninstall() if system == "Windows" else schedule_unix_uninstall()
         elif args.action == "status":
             schedule_status()
 

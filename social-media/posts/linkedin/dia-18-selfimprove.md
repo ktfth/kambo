@@ -17,7 +17,7 @@ Cada tool call registra em SQLite:
 • Precisão dos findings
 • Padrão de uso ao longo do tempo
 
-Isso cria um histórico objetividade de desempenho por ferramenta.
+Isso cria um histórico objetivo de desempenho por ferramenta.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━
 CAMADA 2: Pattern Analyzer
