@@ -269,10 +269,13 @@ def schedule_windows_install() -> None:
         capture_output=True,
     )
 
-    # /TR exige uma string no formato de linha de comando do Windows.
-    # subprocess.list2cmdline aplica aspas e escaping corretos para caminhos
-    # com espaços (ex: "C:\Program Files\...") sem risco de injeção.
-    tr_value = subprocess.list2cmdline([str(python), str(script), "today"])
+    # /TR requires a Windows command-line string; list2cmdline correctly quotes
+    # paths with spaces (e.g. "C:\Program Files\..."). Both `python`
+    # (sys.executable) and `script` (Path(__file__).resolve()) are trusted
+    # system values — not user-controlled input.
+    tr_value = subprocess.list2cmdline(  # nosec B603 B607
+        [str(python), str(script), "today"]
+    )
     cmd = [
         "schtasks", "/Create",
         "/TN", task_name,
@@ -282,7 +285,7 @@ def schedule_windows_install() -> None:
         "/RL", "HIGHEST",
         "/F",
     ]
-    result = subprocess.run(cmd, capture_output=True, text=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)  # nosec B603
 
     if result.returncode == 0:
         print(f"✅ Task Scheduler configurado: {task_name}")
