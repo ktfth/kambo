@@ -29,10 +29,18 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
 
+      - name: Diagnose env
+        run: |
+          python --version
+          which python
+          which pytest || true
+          python -m pytest --version
+          python -c "import kambo; print('kambo from:', kambo.__file__)"
+
       - name: Run pytest (first pass)
         run: |
           mkdir -p .reports
-          pytest --json-report --json-report-file=.reports/current.json -q || true
+          python -m pytest --json-report --json-report-file=.reports/current.json -q || true
 
       - name: Verify pytest produced a valid report
         run: |
@@ -40,11 +48,20 @@ jobs:
             echo "::error::pytest did not produce .reports/current.json — likely a collection or plugin failure. Inspect the previous step's logs."
             exit 1
           fi
-          if ! python -c "import json,sys; data=json.load(open('.reports/current.json')); assert isinstance(data.get('tests'), list), 'tests key missing or not a list'" 2>err.log; then
-            echo "::error::.reports/current.json is not a valid pytest-json-report file:"
-            cat err.log
-            exit 1
-          fi
+          python -c "
+          import json, sys
+          data = json.load(open('.reports/current.json'))
+          tests = data.get('tests')
+          summary = data.get('summary', {})
+          if not isinstance(tests, list):
+              print('::error::tests key missing or not a list in current.json')
+              sys.exit(1)
+          if len(tests) == 0:
+              print(f'::error::pytest collected 0 tests. summary={summary}')
+              print('::error::This usually means: (a) wrong working dir, (b) editable install did not register kambo, or (c) all tests were deselected.')
+              sys.exit(1)
+          print(f'OK — {len(tests)} tests in report. summary={summary}')
+          "
 
       - name: Re-run failed tests for flake detection
         run: |
@@ -57,7 +74,7 @@ jobs:
           print(f'{len(ids)} failed tests to re-run')
           "
           if [ -s .reports/failed-ids.txt ]; then
-            pytest --json-report --json-report-file=.reports/rerun.json -q \
+            python -m pytest --json-report --json-report-file=.reports/rerun.json -q \
               $(cat .reports/failed-ids.txt) || true
           else
             echo '{"tests": []}' > .reports/rerun.json

@@ -29,10 +29,17 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e ".[dev]"
+      - name: Diagnose env
+        run: |
+          python --version
+          which python
+          which pytest || true
+          python -m pytest --version
+          python -c "import kambo; print('kambo from:', kambo.__file__)"
       - name: Run tests
         run: |
           mkdir -p .reports
-          pytest --json-report --json-report-file=.reports/report.json -q
+          python -m pytest --json-report --json-report-file=.reports/report.json -q
       - name: Upload report
         if: always()
         uses: actions/upload-artifact@v4
@@ -72,7 +79,7 @@ jobs:
         shell: bash
         run: |
           mkdir -p .reports
-          pytest --json-report --json-report-file=.reports/report.json \
+          python -m pytest --json-report --json-report-file=.reports/report.json \
                  --cov=src/kambo --cov-report=xml -q
       - name: Upload report
         if: always()
