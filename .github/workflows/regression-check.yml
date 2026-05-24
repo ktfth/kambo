@@ -65,25 +65,34 @@ jobs:
 
       - name: Verify pytest produced a valid report
         run: |
+          dump_log() {
+            echo ""
+            echo "===== FULL pytest.log (last 300 lines) ====="
+            tail -300 .reports/pytest.log 2>/dev/null || echo "(no log file)"
+            echo "===== end pytest.log ====="
+          }
           if [ ! -f .reports/current.json ]; then
-            echo "::error::pytest did not produce .reports/current.json (pytest exit code: $pytest_exit). Inspect the pytest-log artifact."
+            echo "::error::pytest did not produce .reports/current.json (pytest exit code: $pytest_exit)."
+            dump_log
             exit 1
           fi
-          python -c "
+          if ! python -c "
           import json, sys, os
           data = json.load(open('.reports/current.json'))
           tests = data.get('tests')
           summary = data.get('summary', {})
           exit_code = os.environ.get('pytest_exit', '?')
           if not isinstance(tests, list):
-              print('::error::tests key missing or not a list in current.json')
+              print(f'::error::tests key missing or not a list in current.json')
               sys.exit(1)
           if len(tests) == 0:
               print(f'::error::pytest collected {summary.get(\"collected\", 0)} tests but ran 0. exit_code={exit_code} summary={summary}')
-              print('::error::Inspect the pytest-log artifact for the actual error.')
               sys.exit(1)
           print(f'OK — {len(tests)} tests in report. summary={summary}')
-          "
+          "; then
+            dump_log
+            exit 1
+          fi
 
       - name: Re-run failed tests for flake detection
         run: |
