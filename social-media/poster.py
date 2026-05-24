@@ -23,6 +23,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -268,12 +269,14 @@ def schedule_windows_install() -> None:
         capture_output=True,
     )
 
-    # subprocess.run com lista não usa shell; /TR é construído de caminhos
-    # provenientes de sys.executable e __file__ (não de input do usuário).
+    # /TR exige uma string no formato de linha de comando do Windows.
+    # subprocess.list2cmdline aplica aspas e escaping corretos para caminhos
+    # com espaços (ex: "C:\Program Files\...") sem risco de injeção.
+    tr_value = subprocess.list2cmdline([str(python), str(script), "today"])
     cmd = [
         "schtasks", "/Create",
         "/TN", task_name,
-        "/TR", f'"{python}" "{script}" today',
+        "/TR", tr_value,
         "/SC", "DAILY",
         "/ST", "18:00",
         "/RL", "HIGHEST",
@@ -314,7 +317,14 @@ def schedule_unix_install() -> None:
     """Instala o cron job (Linux/macOS) para executar às 18h."""
     script = Path(__file__).resolve()
     python = sys.executable
-    cron_line = f"0 18 * * * cd {BASE_DIR} && {python} {script} today >> {LOG_FILE} 2>&1"
+    # shlex.quote garante que caminhos com espaços ou caracteres especiais
+    # sejam corretamente escapados no crontab (POSIX shell).
+    cron_line = (
+        f"0 18 * * * "
+        f"cd {shlex.quote(str(BASE_DIR))} && "
+        f"{shlex.quote(str(python))} {shlex.quote(str(script))} today "
+        f">> {shlex.quote(str(LOG_FILE))} 2>&1"
+    )
 
     result = subprocess.run(["crontab", "-l"], capture_output=True, text=True)
     current = result.stdout if result.returncode == 0 else ""
