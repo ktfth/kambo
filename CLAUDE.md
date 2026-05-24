@@ -41,6 +41,7 @@ When the user's request matches an available skill, invoke it via the Skill tool
 | Code review, check quality, review kambo | `/kambo-review` |
 | Confidence check, should I report, impact analysis, question findings | `/kambo-confidence` |
 | One-liner, recipe, KingOfBugBounty, OFJAAAH, certstream, technique catalog | `/kambo-kingrecon` |
+| Post social, publicar Threads, post do dia, divulgar kambo | `/kambo-social` |
 
 ## Self-Improvement Loop
 

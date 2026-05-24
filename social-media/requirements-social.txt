@@ -1,0 +1,14 @@
+# Kambo Social Media Poster — Dependências Python
+# Instalar: pip install -r requirements-social.txt
+
+# HTTP client (Threads API)
+httpx>=0.27.0
+
+# Variáveis de ambiente
+python-dotenv>=1.0.0
+
+# Automação de browser com Chrome
+playwright>=1.44.0
+
+# Parsing de Markdown
+mistune>=3.0.0
