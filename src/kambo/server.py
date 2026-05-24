@@ -36,6 +36,239 @@ from kambo.tools import recon, scanning, vulns, exploit, post_exploit, reporting
 server = Server("kambo")
 
 
+# ---------------------------------------------------------------------------
+# Tool registry — new tools are registered here instead of being duplicated
+# across list_tools() and _dispatch_tool().  Each entry binds the MCP Tool
+# metadata to a dispatch callable so future additions only touch one place.
+# ---------------------------------------------------------------------------
+
+from dataclasses import dataclass
+from typing import Any, Callable, Coroutine
+
+
+@dataclass(frozen=True)
+class _ToolEntry:
+    """Bundles MCP Tool metadata with a single-argument dispatch coroutine."""
+
+    tool: Tool
+    dispatch: Callable[[dict[str, Any]], Coroutine[Any, Any, dict[str, Any]]]
+
+
+# Tools added in the structural-gap fix are registered here.
+# Legacy tools remain in list_tools() / _dispatch_tool() for compatibility
+# and can be migrated into this registry incrementally.
+_TOOL_REGISTRY: dict[str, _ToolEntry] = {
+    # ── vuln ──────────────────────────────────────────────────────────────
+    "vuln_ssti": _ToolEntry(
+        tool=Tool(name="vuln_ssti",
+                  description="Server-Side Template Injection detection — tests {{7*7}}→49 across Jinja2, Twig, Freemarker, Velocity, ERB",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "URL to test"},
+                          "parameter": {"type": "string", "description": "Parameter to inject into (empty = try query string)"},
+                          "engine": {"type": "string", "enum": ["auto", "jinja2", "twig", "smarty", "velocity"], "description": "Template engine hint (default: auto)"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_ssti(a["target"], a.get("parameter", ""), a.get("engine", "auto")),
+    ),
+
+    # ── API Security (OWASP API Top 10) ───────────────────────────────────
+    "api_test_auth": _ToolEntry(
+        tool=Tool(name="api_test_auth",
+                  description="API authentication weakness testing — missing auth, broken token validation, improper session handling",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "API base URL"},
+                          "checks": {"type": "array", "items": {"type": "string"}, "description": "Check types to run"},
+                          "token": {"type": "string", "description": "Auth token to include in requests"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: api_security.api_test_auth(a["target"], a.get("checks"), a.get("token", "")),
+    ),
+    "api_test_bopla": _ToolEntry(
+        tool=Tool(name="api_test_bopla",
+                  description="BOPLA/mass assignment testing — broken object property level authorization (API3:2023)",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "API base URL"},
+                          "endpoint": {"type": "string", "description": "Specific endpoint to test"},
+                          "token": {"type": "string", "description": "Auth token"},
+                          "mass_assignment_fields": {"type": "array", "items": {"type": "string"}, "description": "Fields to attempt mass assignment on"},
+                      },
+                      "required": ["target", "endpoint", "token"],
+                  }),
+        dispatch=lambda a: api_security.api_test_bopla(a["target"], a["endpoint"], a["token"], a.get("mass_assignment_fields")),
+    ),
+    "api_test_resource": _ToolEntry(
+        tool=Tool(name="api_test_resource",
+                  description="API resource consumption and rate limiting tests (API4:2023)",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "API base URL"},
+                          "endpoint": {"type": "string", "description": "Endpoint to test (default: /api/search)"},
+                          "bypass_headers": {"type": "array", "items": {"type": "string"}, "description": "Headers to test for rate limit bypass"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: api_security.api_test_resource(a["target"], a.get("endpoint", "/api/search"), a.get("bypass_headers")),
+    ),
+
+    # ── Container / Kubernetes ────────────────────────────────────────────
+    "container_escape_detect": _ToolEntry(
+        tool=Tool(name="container_escape_detect",
+                  description="Detect container escape vectors (privileged mode, host mounts, dangerous capabilities)",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {"target": {"type": "string", "description": "Target host running containers"}},
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: containers.container_escape_detect(a["target"]),
+    ),
+    "container_image_scan": _ToolEntry(
+        tool=Tool(name="container_image_scan",
+                  description="Scan container image for vulnerabilities using Trivy",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Target host or registry"},
+                          "image": {"type": "string", "description": "Container image name and tag"},
+                      },
+                      "required": ["target", "image"],
+                  }),
+        dispatch=lambda a: containers.container_image_scan(a["target"], a["image"]),
+    ),
+    "k8s_rbac_enum": _ToolEntry(
+        tool=Tool(name="k8s_rbac_enum",
+                  description="Kubernetes RBAC enumeration — overprivileged roles, service accounts, cluster-admin abuse",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Kubernetes API server URL or host"},
+                          "token": {"type": "string", "description": "Service account or user token"},
+                          "api_server": {"type": "string", "description": "API server URL (if different from target)"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: containers.k8s_rbac_enum(a["target"], a.get("token", ""), a.get("api_server", "")),
+    ),
+
+    # ── Active Directory ──────────────────────────────────────────────────
+    "ad_bloodhound": _ToolEntry(
+        tool=Tool(name="ad_bloodhound",
+                  description="BloodHound Active Directory attack path collection",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Domain controller IP"},
+                          "domain": {"type": "string", "description": "AD domain name"},
+                          "username": {"type": "string", "description": "AD username"},
+                          "password": {"type": "string", "description": "AD password"},
+                          "collection": {"type": "string", "description": "Collection method (default: All)"},
+                      },
+                      "required": ["target", "domain", "username", "password"],
+                  }),
+        dispatch=lambda a: ad.ad_bloodhound(a["target"], a["domain"], a["username"], a["password"], a.get("collection", "All")),
+    ),
+    "ad_kerberoast": _ToolEntry(
+        tool=Tool(name="ad_kerberoast",
+                  description="Kerberoasting — request and extract service ticket hashes for offline cracking",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Domain controller IP"},
+                          "domain": {"type": "string", "description": "AD domain name"},
+                          "username": {"type": "string", "description": "AD username"},
+                          "password": {"type": "string", "description": "AD password"},
+                      },
+                      "required": ["target", "domain", "username", "password"],
+                  }),
+        dispatch=lambda a: ad.ad_kerberoast(a["target"], a["domain"], a["username"], a["password"]),
+    ),
+    "ad_asrep_roast": _ToolEntry(
+        tool=Tool(name="ad_asrep_roast",
+                  description="AS-REP Roasting — extract hashes for accounts with pre-auth disabled",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Domain controller IP"},
+                          "domain": {"type": "string", "description": "AD domain name"},
+                          "users_file": {"type": "string", "description": "Path to file containing usernames"},
+                          "users": {"type": "array", "items": {"type": "string"}, "description": "List of usernames to test"},
+                      },
+                      "required": ["target", "domain"],
+                  }),
+        dispatch=lambda a: ad.ad_asrep_roast(a["target"], a["domain"], a.get("users_file", ""), a.get("users", [])),
+    ),
+    "ad_pass_the_hash": _ToolEntry(
+        tool=Tool(name="ad_pass_the_hash",
+                  description="Pass-the-Hash attack — authenticate using NTLM hash without plaintext password",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Target host"},
+                          "username": {"type": "string", "description": "Username"},
+                          "ntlm_hash": {"type": "string", "description": "NTLM hash (LM:NT format)"},
+                          "domain": {"type": "string", "description": "Domain name"},
+                      },
+                      "required": ["target", "username", "ntlm_hash"],
+                  }),
+        dispatch=lambda a: ad.ad_pass_the_hash(a["target"], a["username"], a["ntlm_hash"], a.get("domain", "")),
+    ),
+    "ad_dcsync": _ToolEntry(
+        tool=Tool(name="ad_dcsync",
+                  description="DCSync attack — extract domain credentials by simulating domain replication",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Domain controller IP"},
+                          "domain": {"type": "string", "description": "AD domain name"},
+                          "username": {"type": "string", "description": "Username with replication rights"},
+                          "password": {"type": "string", "description": "Password for authentication"},
+                          "ntlm_hash": {"type": "string", "description": "NTLM hash (alternative to password)"},
+                          "target_user": {"type": "string", "description": "User to extract (default: krbtgt)"},
+                      },
+                      "required": ["target", "domain", "username"],
+                  }),
+        dispatch=lambda a: ad.ad_dcsync(a["target"], a["domain"], a["username"], a.get("password", ""), a.get("ntlm_hash", ""), a.get("target_user", "krbtgt")),
+    ),
+    "ad_certify": _ToolEntry(
+        tool=Tool(name="ad_certify",
+                  description="AD CS (Active Directory Certificate Services) vulnerability enumeration — ESC1-ESC8",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Domain controller or CA server IP"},
+                          "domain": {"type": "string", "description": "AD domain name"},
+                          "username": {"type": "string", "description": "AD username"},
+                          "password": {"type": "string", "description": "AD password"},
+                      },
+                      "required": ["target", "domain", "username", "password"],
+                  }),
+        dispatch=lambda a: ad.ad_certify(a["target"], a["domain"], a["username"], a["password"]),
+    ),
+    "ad_ntlm_relay": _ToolEntry(
+        tool=Tool(name="ad_ntlm_relay",
+                  description="NTLM relay attack — capture and relay authentication to gain access",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Target to capture NTLM from"},
+                          "relay_target": {"type": "string", "description": "Host to relay auth to"},
+                          "method": {"type": "string", "description": "Relay method: smb, ldap, http"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: ad.ad_ntlm_relay(a["target"], a.get("relay_target", ""), a.get("method", "smb")),
+    ),
+}
+
+
 # === TOOLS ===
 
 @server.list_tools()
@@ -159,6 +392,21 @@ async def list_tools() -> list[Tool]:
             "properties": {"target": {"type": "string"}},
             "required": ["target"],
         }),
+        Tool(name="scan_udp", description="UDP port scan using nmap", inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "IP or host to scan"},
+                "top_ports": {"type": "integer", "description": "Number of top UDP ports to scan (default: 100)"},
+            },
+            "required": ["target"],
+        }),
+        Tool(name="scan_cms", description="CMS detection and vulnerability scanning (WordPress, Joomla, Drupal)", inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "URL of target CMS"},
+            },
+            "required": ["target"],
+        }),
         # Phase 3: Vulnerability Analysis
         Tool(name="vuln_sqli", description="SQL Injection detection with sqlmap", inputSchema={
             "type": "object",
@@ -208,6 +456,15 @@ async def list_tools() -> list[Tool]:
             "properties": {"target": {"type": "string"}},
             "required": ["target"],
         }),
+        Tool(name="vuln_nuclei_scan", description="Nuclei-based vulnerability scan using CVE and vuln templates", inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target URL or host"},
+                "templates": {"type": "string", "description": "Comma-separated template categories (default: cves,vulnerabilities)"},
+                "severity": {"type": "string", "description": "Comma-separated severity filter (default: critical,high)"},
+            },
+            "required": ["target"],
+        }),
         # Phase 4: Exploitation
         Tool(name="exploit_sqli", description="SQL Injection exploitation (extract data)", inputSchema={
             "type": "object",
@@ -234,6 +491,14 @@ async def list_tools() -> list[Tool]:
                 "target": {"type": "string"},
                 "parameter": {"type": "string"},
                 "internal_target": {"type": "string"},
+            },
+            "required": ["target"],
+        }),
+        Tool(name="exploit_auth_bypass", description="Authentication bypass testing using default credentials, token forgery, or logic flaws", inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target URL"},
+                "method": {"type": "string", "description": "Bypass method: default_creds, token_forgery, logic_flaw"},
             },
             "required": ["target"],
         }),
@@ -274,6 +539,24 @@ async def list_tools() -> list[Tool]:
                 "method": {"type": "string", "enum": ["pass_the_hash", "wmiexec", "psexec", "evil_winrm"]},
             },
             "required": ["target", "username"],
+        }),
+        Tool(name="post_privesc_windows", description="Windows privilege escalation enumeration (winPEAS, token abuse, service misconfigs)", inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target Windows host"},
+            },
+            "required": ["target"],
+        }),
+        Tool(name="post_cred_dump", description="Credential dumping via secretsdump or mimikatz (SAM, NTDS, LSA secrets)", inputSchema={
+            "type": "object",
+            "properties": {
+                "target": {"type": "string", "description": "Target host"},
+                "domain": {"type": "string", "description": "Domain name"},
+                "username": {"type": "string", "description": "Username for authentication"},
+                "password": {"type": "string", "description": "Password for authentication"},
+                "ntlm_hash": {"type": "string", "description": "NTLM hash for pass-the-hash"},
+            },
+            "required": ["target"],
         }),
         # API Security
         Tool(name="api_test_bola", description="BOLA testing (API1:2023) — horizontal authz bypass", inputSchema={
@@ -581,6 +864,8 @@ async def list_tools() -> list[Tool]:
             },
             "required": ["platform", "handle", "title", "body"],
         }),
+        # Tools from the registry — defined once, no duplication
+        *[entry.tool for entry in _TOOL_REGISTRY.values()],
     ]
 
 
@@ -670,6 +955,10 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         return await scanning.scan_parameters(args["target"])
     if name == "scan_tls":
         return await scanning.scan_tls(args["target"])
+    if name == "scan_udp":
+        return await scanning.scan_udp(args["target"], args.get("top_ports", 100))
+    if name == "scan_cms":
+        return await scanning.scan_cms(args["target"])
 
     # Phase 3: Vulns
     if name == "vuln_sqli":
@@ -687,7 +976,8 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         return await vulns.vuln_idor(args["target"], args["token"], id_range)
     if name == "vuln_subdomain_takeover":
         return await vulns.vuln_subdomain_takeover(args["target"])
-
+    if name == "vuln_nuclei_scan":
+        return await vulns.vuln_nuclei_scan(args["target"], args.get("templates", "cves,vulnerabilities"), args.get("severity", "critical,high"))
     # Phase 4: Exploitation
     if name == "exploit_sqli":
         return await exploit.exploit_sqli(args["target"], args.get("parameter", ""), args.get("action", "dbs"))
@@ -695,6 +985,8 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         return await exploit.exploit_password_spray(args["target"], users=args.get("users"), password=args["password"], service=args.get("service", "ssh"))
     if name == "exploit_ssrf":
         return await exploit.exploit_ssrf(args["target"], args.get("parameter", "url"), args.get("internal_target", "http://169.254.169.254/latest/meta-data/"))
+    if name == "exploit_auth_bypass":
+        return await exploit.exploit_auth_bypass(args["target"], args.get("method", "default_creds"))
 
     # Phase 5: Post-Exploitation
     if name == "post_privesc_linux":
@@ -705,6 +997,10 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         return await post_exploit.post_kerberoast(args["target"], args["domain"], args["username"], args["password"])
     if name == "post_lateral_move":
         return await post_exploit.post_lateral_move(args["target"], args.get("username", ""), args.get("password", ""), args.get("ntlm_hash", ""), args.get("method", "pass_the_hash"))
+    if name == "post_privesc_windows":
+        return await post_exploit.post_privesc_windows(args["target"])
+    if name == "post_cred_dump":
+        return await post_exploit.post_cred_dump(args["target"], args.get("domain", ""), args.get("username", ""), args.get("password", ""), args.get("ntlm_hash", ""))
 
     # API Security
     if name == "api_test_bola":
@@ -713,6 +1009,9 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
         return await api_security.api_test_bfla(args["target"], args["regular_token"], args.get("admin_endpoints"))
     if name == "api_test_misconfig":
         return await api_security.api_test_misconfig(args["target"])
+    # Registry-based dispatch — new tools added to _TOOL_REGISTRY above
+    if name in _TOOL_REGISTRY:
+        return await _TOOL_REGISTRY[name].dispatch(args)
 
     # Cloud
     if name == "cloud_imds_test":
