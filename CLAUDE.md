@@ -40,6 +40,7 @@ When the user's request matches an available skill, invoke it via the Skill tool
 | Tutorial, teach, how to use, walkthrough | `/kambo-awake` |
 | Code review, check quality, review kambo | `/kambo-review` |
 | Confidence check, should I report, impact analysis, question findings | `/kambo-confidence` |
+| One-liner, recipe, KingOfBugBounty, OFJAAAH, certstream, technique catalog | `/kambo-kingrecon` |
 
 ## Self-Improvement Loop
 
