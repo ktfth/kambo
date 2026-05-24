@@ -1,0 +1,77 @@
+<?xml version="1.0" encoding="UTF-16"?>
+<!--
+  Kambo Social Media Poster — Windows Task Scheduler
+
+  Como importar manualmente (alternativa ao setup-windows.ps1):
+
+  1. Edite este arquivo:
+     - Substitua CAMINHO_DO_PYTHON pelo caminho do seu Python
+       Exemplo: C:\Users\joao\AppData\Local\Programs\Python\Python313\python.exe
+     - Substitua CAMINHO_DO_KAMBO pelo caminho da pasta social-media
+       Exemplo: C:\Users\joao\projects\kambo\social-media
+     - Substitua SEU_USUARIO pelo seu nome de usuário do Windows
+
+  2. Importe no Task Scheduler:
+     schtasks /Create /XML windows-task.xml /TN "KamboSocialPoster"
+
+     Ou via GUI:
+     Abra "Agendador de Tarefas" → "Ação" → "Importar Tarefa..."
+-->
+<Task version="1.4" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">
+  <RegistrationInfo>
+    <Description>Kambo — Publica o post diário do projeto no Threads às 18h00</Description>
+    <Author>Kambo Social Poster</Author>
+  </RegistrationInfo>
+
+  <Triggers>
+    <CalendarTrigger>
+      <!-- Modifique a data de início para hoje -->
+      <StartBoundary>2026-05-24T18:00:00</StartBoundary>
+      <Enabled>true</Enabled>
+      <ScheduleByDay>
+        <DaysInterval>1</DaysInterval>
+      </ScheduleByDay>
+    </CalendarTrigger>
+  </Triggers>
+
+  <Principals>
+    <Principal id="Author">
+      <!-- Substitua SEU_USUARIO pelo seu nome de usuário do Windows -->
+      <UserId>SEU_USUARIO</UserId>
+      <LogonType>InteractiveToken</LogonType>
+      <RunLevel>HighestAvailable</RunLevel>
+    </Principal>
+  </Principals>
+
+  <Settings>
+    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
+    <RunOnlyIfNetworkAvailable>true</RunOnlyIfNetworkAvailable>
+    <IdleSettings>
+      <StopOnIdleEnd>false</StopOnIdleEnd>
+      <RestartOnIdle>false</RestartOnIdle>
+    </IdleSettings>
+    <AllowStartOnDemand>true</AllowStartOnDemand>
+    <Enabled>true</Enabled>
+    <Hidden>false</Hidden>
+    <RunOnlyIfIdle>false</RunOnlyIfIdle>
+    <DisallowStartOnRemoteAppSession>false</DisallowStartOnRemoteAppSession>
+    <UseUnifiedSchedulingEngine>true</UseUnifiedSchedulingEngine>
+    <WakeToRun>false</WakeToRun>
+    <ExecutionTimeLimit>PT1H</ExecutionTimeLimit>
+    <Priority>7</Priority>
+  </Settings>
+
+  <Actions Context="Author">
+    <Exec>
+      <!-- Substitua CAMINHO_DO_PYTHON pelo caminho completo do python.exe -->
+      <Command>CAMINHO_DO_PYTHON</Command>
+      <!-- Substitua CAMINHO_DO_KAMBO pelo caminho completo da pasta social-media -->
+      <Arguments>"CAMINHO_DO_KAMBO\poster.py" today</Arguments>
+      <WorkingDirectory>CAMINHO_DO_KAMBO</WorkingDirectory>
+    </Exec>
+  </Actions>
+</Task>
