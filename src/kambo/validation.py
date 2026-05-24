@@ -1221,3 +1221,260 @@ def validate_open_redirect(
         )
 
     return chain
+
+
+# ---------------------------------------------------------------------------
+# validate_ssti — Server-Side Template Injection
+# ---------------------------------------------------------------------------
+
+_SSTI_CONFIRMED_PATTERNS: list[str] = [
+    r"49",                          # {{7*7}} rendered
+    r"7777777",                     # {{7*'7'}} → Python/Jinja2
+    r"<class 'str'>",               # Python object exposure
+    r"warning.*template.*syntax",   # Twig/Smarty error
+    r"undefined.*variable.*template",  # Smarty error
+    r"org\.springframework",         # Spring EL
+]
+
+_SSTI_FP_PATTERNS: list[str] = [
+    r"\{\{7\*7\}\}",   # payload reflected literally (not rendered)
+    r"expression.*invalid",
+    r"syntax.*error.*template",   # template engine rejected it (not vulnerable)
+]
+
+
+def validate_ssti(
+    output: str,
+    payload: str = "{{7*7}}",
+    expected_render: str = "49",
+    baseline_body: str = "",
+    error_based: bool = False,
+) -> EvidenceChain:
+    """Validate Server-Side Template Injection (SSTI).
+
+    The gold standard: send {{7*7}} and check if the response contains 49.
+    Also detects Python/Jinja2 object exposure and error-based SSTI.
+
+    Args:
+        output: Response body
+        payload: Template injection payload used
+        expected_render: What the payload should render to (e.g., "49" for {{7*7}})
+        baseline_body: Normal response without payload for comparison
+        error_based: Whether to detect error-based SSTI (verbose errors)
+    """
+    chain = EvidenceChain()
+
+    if not output or not output.strip():
+        return chain.add_fp_check("Empty output — no SSTI evidence")
+
+    # FP check: payload reflected literally (not rendered)
+    if payload and payload in output:
+        # If the payload appears as-is AND expected_render doesn't appear, it's a reflection, not render
+        if expected_render not in output:
+            return chain.add_fp_check("Payload reflected literally — template not rendered")
+
+    # FP check: template engine explicitly rejected the payload
+    for pattern in _SSTI_FP_PATTERNS[1:]:  # skip literal reflection check (already handled)
+        if re.search(pattern, output, re.IGNORECASE):
+            return chain.add_fp_check(f"Template engine rejected payload: {pattern}")
+
+    # Primary signal: expected render found
+    if expected_render and expected_render in output:
+        chain = chain.add(
+            signal=f"Template expression rendered: {payload!r} → {expected_render!r}",
+            source="ssti_render_analysis",
+            raw_data=_extract_context(output, re.escape(expected_render)),
+            weight=2.0,
+        )
+
+    # Secondary signal: Python object exposure (Jinja2/Tornado/Mako)
+    python_exposure_patterns = [
+        (r"<class '(str|int|dict|list|object)'", "Python class exposed in response"),
+        (r"__class__.*__mro__", "Python MRO attribute exposed"),
+        (r"<built-in", "Python built-in function exposed"),
+    ]
+    for pattern, description in python_exposure_patterns:
+        if re.search(pattern, output, re.IGNORECASE):
+            chain = chain.add(
+                signal=description,
+                source="ssti_python_exposure",
+                raw_data=_extract_context(output, pattern),
+                weight=1.5,
+            )
+            break
+
+    # Error-based SSTI signals
+    if error_based:
+        for pattern in _SSTI_CONFIRMED_PATTERNS[3:]:  # error patterns
+            if re.search(pattern, output, re.IGNORECASE):
+                chain = chain.add(
+                    signal=f"Template engine error exposed: {pattern}",
+                    source="ssti_error_analysis",
+                    raw_data=_extract_context(output, pattern),
+                    weight=0.8,
+                )
+                break
+
+    # Baseline comparison: if response differs and expected render present
+    if baseline_body and output.strip() != baseline_body.strip():
+        if expected_render in output and expected_render not in baseline_body:
+            chain = chain.add(
+                signal="Response differs from baseline and contains rendered payload",
+                source="ssti_baseline_comparison",
+                weight=0.5,
+            )
+
+    return chain
+
+
+# ---------------------------------------------------------------------------
+# validate_prototype_pollution — Prototype Pollution (JavaScript)
+# ---------------------------------------------------------------------------
+
+def validate_prototype_pollution(
+    output: str,
+    payload: str = "__proto__",
+    injected_value: str = "",
+    baseline_body: str = "",
+) -> EvidenceChain:
+    """Validate Prototype Pollution findings.
+
+    Checks if injected properties propagate to response fields or cause
+    observable behavior changes.
+
+    Args:
+        output: Response body
+        payload: Injection payload used (e.g., __proto__[polluted]=1)
+        injected_value: The value that was injected (for confirmation check)
+        baseline_body: Normal response for comparison
+    """
+    chain = EvidenceChain()
+
+    if not output or not output.strip():
+        return chain.add_fp_check("Empty output — no prototype pollution evidence")
+
+    # FP check: JSON parse error (server rejected malformed input)
+    if re.search(r"(invalid json|json parse|unexpected token|malformed)", output, re.IGNORECASE):
+        return chain.add_fp_check("Server rejected input as malformed JSON — not polluted")
+
+    # Primary signal: injected value appears in unexpected response field
+    if injected_value and injected_value in output:
+        # Check it's not just reflected in an error
+        if not re.search(r"(error|invalid|rejected|blocked)", output[:200], re.IGNORECASE):
+            chain = chain.add(
+                signal=f"Injected value '{injected_value[:50]}' found in response",
+                source="prototype_pollution_value_check",
+                raw_data=_extract_context(output, re.escape(injected_value[:30])),
+                weight=1.5,
+            )
+
+    # Pollution signals in response
+    pollution_signals = [
+        (r'"polluted"\s*:', "Polluted key reflected in JSON response"),
+        (r'"__proto__"\s*:', "Proto key reflected in JSON response"),
+        (r'"constructor"\s*.*"prototype"', "Constructor/prototype exposed in response"),
+        (r"Object\.prototype", "Object.prototype referenced in response"),
+    ]
+    for pattern, description in pollution_signals:
+        if re.search(pattern, output, re.IGNORECASE):
+            chain = chain.add(
+                signal=description,
+                source="prototype_pollution_signature",
+                raw_data=_extract_context(output, pattern),
+                weight=1.0,
+            )
+            break
+
+    # Baseline comparison
+    if baseline_body and output.strip() != baseline_body.strip():
+        if injected_value and injected_value in output and injected_value not in baseline_body:
+            chain = chain.add(
+                signal="Injected value appears in response but not in baseline",
+                source="prototype_pollution_baseline",
+                weight=0.5,
+            )
+
+    return chain
+
+
+# ---------------------------------------------------------------------------
+# validate_deserialization — Insecure Deserialization
+# ---------------------------------------------------------------------------
+
+_DESER_FP_PATTERNS: list[str] = [
+    r"(deserialization.*not.*supported|serializ.*disabled)",
+    r"(invalid.*serial.*format|corrupt.*object)",
+]
+
+_DESER_CONFIRMED_SIGNALS: list[tuple[str, str, float]] = [
+    (r"uid=\d+\(", "OS command output (RCE via deserialization)", 2.0),
+    (r"java\.lang\.Runtime", "Java Runtime class exposed — RCE possible", 1.5),
+    (r"org\.apache\.commons\.collections", "Apache Commons gadget chain detected", 1.5),
+    (r"ysoserial", "ysoserial gadget chain signature", 1.0),
+    (r"java\.io\.NotSerializableException", "Java serialization error — endpoint processes Java objects", 0.8),
+    (r"php.*unserialize.*error|__wakeup.*called", "PHP deserialization hook triggered", 1.0),
+    (r"pickle.*protocol|_reduce_|__reduce__", "Python pickle deserialization signal", 1.5),
+    (r"(dns.*callback|oob.*callback|burpcollaborator|interactsh)", "OOB callback via deserialization", 1.5),
+]
+
+
+def validate_deserialization(
+    output: str,
+    payload_type: str = "java",
+    expected_output: str = "",
+    response_time_ms: float = 0,
+    baseline_time_ms: float = 0,
+) -> EvidenceChain:
+    """Validate Insecure Deserialization findings.
+
+    Detects Java (ysoserial), PHP (unserialize), and Python (pickle)
+    deserialization vulnerabilities.
+
+    Args:
+        output: Response body or error output
+        payload_type: Type of payload used — java, php, python
+        expected_output: Expected command output for RCE-based detection
+        response_time_ms: Response time with sleep payload (for time-based detection)
+        baseline_time_ms: Baseline response time
+    """
+    chain = EvidenceChain()
+
+    if not output and response_time_ms == 0:
+        return chain.add_fp_check("No output and no timing data — cannot assess")
+
+    # FP check: explicitly rejected
+    for pattern in _DESER_FP_PATTERNS:
+        if re.search(pattern, output, re.IGNORECASE):
+            return chain.add_fp_check(f"Deserialization explicitly rejected: {pattern}")
+
+    # Primary signal: expected command output (RCE confirmation)
+    if expected_output and expected_output in output:
+        chain = chain.add(
+            signal=f"Expected command output found: {expected_output[:100]}",
+            source="deserialization_rce_confirm",
+            raw_data=output[:500],
+            weight=2.0,
+        )
+
+    # Check all confirmed signals
+    for pattern, description, weight in _DESER_CONFIRMED_SIGNALS:
+        if re.search(pattern, output, re.IGNORECASE):
+            chain = chain.add(
+                signal=description,
+                source="deserialization_signature",
+                raw_data=_extract_context(output, pattern),
+                weight=weight,
+            )
+            break  # one strong signal is enough
+
+    # Time-based detection (sleep payload)
+    if response_time_ms > 0 and baseline_time_ms > 0:
+        delay = response_time_ms - baseline_time_ms
+        if delay > 5000:  # 5+ second delay
+            chain = chain.add(
+                signal=f"Time-based delay: {delay:.0f}ms (baseline: {baseline_time_ms:.0f}ms)",
+                source="deserialization_time_based",
+                weight=1.5 if delay > 8000 else 1.0,
+            )
+
+    return chain

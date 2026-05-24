@@ -282,6 +282,127 @@ def _parse_vhosts(result: dict) -> list[DiscoveredAsset]:
     return assets
 
 
+@_register_parser("recon_waf")
+def _parse_waf(result: dict) -> list[DiscoveredAsset]:
+    assets = []
+    waf = result.get("waf") or result.get("waf_name", "")
+    if waf and waf != "none":
+        target = result.get("target", "")
+        assets.append(DiscoveredAsset(
+            asset_type=AssetType.TECHNOLOGY,
+            value=f"waf:{waf}",
+            source_tool="recon_waf",
+            phase=Phase.RECON,
+            metadata={"target": target, "waf": waf},
+        ))
+    return assets
+
+
+@_register_parser("recon_certs")
+def _parse_certs(result: dict) -> list[DiscoveredAsset]:
+    assets = []
+    for domain in result.get("domains", result.get("sans", [])):
+        if isinstance(domain, str) and domain and "*" not in domain:
+            assets.append(DiscoveredAsset(
+                asset_type=AssetType.SUBDOMAIN,
+                value=domain,
+                source_tool="recon_certs",
+                phase=Phase.RECON,
+                metadata={"source": "certificate_transparency"},
+            ))
+    return assets
+
+
+@_register_parser("recon_asn")
+def _parse_asn(result: dict) -> list[DiscoveredAsset]:
+    assets = []
+    for cidr in result.get("cidrs", result.get("ip_ranges", [])):
+        if isinstance(cidr, str):
+            assets.append(DiscoveredAsset(
+                asset_type=AssetType.IP,
+                value=cidr,
+                source_tool="recon_asn",
+                phase=Phase.RECON,
+                metadata={"asn": result.get("asn", ""), "org": result.get("org", "")},
+            ))
+    return assets
+
+
+@_register_parser("scan_tls")
+def _parse_tls(result: dict) -> list[DiscoveredAsset]:
+    assets = []
+    target = result.get("target", "")
+    # Extract weak protocols and ciphers as TECHNOLOGY signals
+    for protocol in result.get("weak_protocols", []):
+        assets.append(DiscoveredAsset(
+            asset_type=AssetType.TECHNOLOGY,
+            value=f"weak_tls:{protocol}",
+            source_tool="scan_tls",
+            phase=Phase.SCANNING,
+            metadata={"target": target, "protocol": protocol},
+        ))
+    # Extract certificate SANs as subdomains
+    for san in result.get("sans", []):
+        if isinstance(san, str) and san and "*" not in san:
+            assets.append(DiscoveredAsset(
+                asset_type=AssetType.SUBDOMAIN,
+                value=san,
+                source_tool="scan_tls",
+                phase=Phase.SCANNING,
+            ))
+    return assets
+
+
+@_register_parser("scan_services")
+def _parse_services(result: dict) -> list[DiscoveredAsset]:
+    assets = []
+    for svc in result.get("services", []):
+        port = svc.get("port", "")
+        service = svc.get("service", "")
+        version = svc.get("version", "")
+        target = result.get("target", svc.get("host", ""))
+        if port and service:
+            assets.append(DiscoveredAsset(
+                asset_type=AssetType.PORT,
+                value=str(port),
+                source_tool="scan_services",
+                phase=Phase.SCANNING,
+                metadata={"service": service, "version": version, "target": target},
+            ))
+            if service:
+                assets.append(DiscoveredAsset(
+                    asset_type=AssetType.TECHNOLOGY,
+                    value=f"{service}{':' + version if version else ''}",
+                    source_tool="scan_services",
+                    phase=Phase.SCANNING,
+                    metadata={"port": port, "target": target},
+                ))
+    return assets
+
+
+@_register_parser("scan_vulns")
+def _parse_scan_vulns(result: dict) -> list[DiscoveredAsset]:
+    """Parse nuclei scan_vulns results into FINDING assets."""
+    assets = []
+    target = result.get("target", "")
+    for finding in result.get("findings", []):
+        template_id = finding.get("template_id", finding.get("name", "unknown"))
+        severity = finding.get("severity", "info")
+        if severity in ("critical", "high", "medium"):
+            assets.append(DiscoveredAsset(
+                asset_type=AssetType.FINDING,
+                value=f"nuclei:{template_id}",
+                source_tool="scan_vulns",
+                phase=Phase.SCANNING,
+                metadata={
+                    "severity": severity,
+                    "matched_at": finding.get("matched_at", ""),
+                    "target": target,
+                },
+            ))
+    return assets
+
+
 def _is_ip(value: str) -> bool:
     """Check if a string looks like an IP address."""
     return bool(re.match(r"^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$", value))

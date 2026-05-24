@@ -396,6 +396,99 @@ async def vuln_idor(
     }
 
 
+async def vuln_ssti(
+    target: str,
+    parameter: str = "",
+    engine: str = "auto",
+) -> dict:
+    """Server-Side Template Injection detection.
+
+    Tests template expression rendering — {{7*7}}→49 is the gold standard.
+    Detects Jinja2, Twig, Smarty, Freemarker, Velocity, Pebble.
+
+    Args:
+        target: URL to test
+        parameter: Parameter to inject into (empty = try all)
+        engine: Template engine hint (auto, jinja2, twig, smarty, velocity)
+    """
+    validate_scope(target)
+    runner = get_runner()
+    metrics = get_metrics()
+
+    from kambo.validation import validate_ssti
+
+    url = target if target.startswith("http") else f"https://{target}"
+
+    # Engine-specific payloads → expected output
+    payloads: list[tuple[str, str, str]] = [
+        ("{{7*7}}", "49", "jinja2/twig"),
+        ("${7*7}", "49", "freemarker/velocity"),
+        ("{{7*'7'}}", "7777777", "jinja2-python"),
+        ("<%= 7*7 %>", "49", "erb/ejs"),
+        ("#{7*7}", "49", "ruby-interpolation"),
+    ]
+
+    if engine != "auto":
+        engine_map = {
+            "jinja2": [("{{7*7}}", "49", "jinja2"), ("{{7*'7'}}", "7777777", "jinja2-python")],
+            "twig": [("{{7*7}}", "49", "twig"), ("{{7*'7'}}", "49math", "twig")],
+            "smarty": [("{$smarty.version}", "", "smarty"), ("{7*7}", "49", "smarty-math")],
+            "velocity": [("${7*7}", "49", "velocity")],
+        }
+        payloads = engine_map.get(engine, payloads)
+
+    # Get baseline first
+    cmd_baseline = f'curl -s -m 15 "{url}" 2>/dev/null'
+    baseline_result = await runner.run(cmd_baseline, "vuln_ssti_baseline", target, Phase.VULN_ANALYSIS, timeout=20)
+    baseline_body = baseline_result.raw_output
+
+    chain = EvidenceChain()
+    chain = chain.set_baseline({"body_length": len(baseline_body)})
+
+    results: list[dict] = []
+    for payload, expected, engine_name in payloads:
+        import urllib.parse
+        encoded = urllib.parse.quote(payload)
+        test_url = f"{url}{'&' if '?' in url else '?'}{parameter}={encoded}" if parameter else f"{url}?q={encoded}"
+        cmd = f'curl -s -m 15 "{test_url}" 2>/dev/null'
+        result = await runner.run(cmd, "vuln_ssti", target, Phase.VULN_ANALYSIS, timeout=20)
+
+        ssti_chain = validate_ssti(
+            output=result.raw_output,
+            payload=payload,
+            expected_render=expected,
+            baseline_body=baseline_body,
+        )
+        if ssti_chain.total_weight > 0:
+            chain = chain.add(
+                signal=f"SSTI confirmed: {engine_name} — {payload!r} rendered to {expected!r}",
+                source="vuln_ssti",
+                raw_data=result.raw_output[:500],
+                weight=ssti_chain.total_weight,
+            )
+            results.append({
+                "payload": payload,
+                "expected": expected,
+                "engine": engine_name,
+                "confidence": ssti_chain.confidence.value,
+                "evidence": ssti_chain.summary(),
+            })
+            break  # one confirmed SSTI is enough
+
+    metrics.record_run("vuln_ssti")
+    if chain.total_weight > 0:
+        metrics.record_finding("vuln_ssti", chain.confidence, chain.total_weight)
+
+    return {
+        "target": target,
+        "parameter": parameter,
+        "vulnerable": chain.total_weight >= 1.0,
+        "confidence": chain.confidence.value,
+        "evidence": chain.summary(),
+        "ssti_results": results,
+    }
+
+
 async def vuln_nuclei_scan(
     target: str,
     templates: str = "cves,vulnerabilities",
