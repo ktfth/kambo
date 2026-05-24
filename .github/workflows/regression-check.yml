@@ -1,0 +1,181 @@
+name: regression-check
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pull-requests: write
+  actions: read
+
+concurrency:
+  group: regression-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  regression:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e ".[dev]"
+
+      - name: Diagnose env
+        run: |
+          python --version
+          which python
+          which pytest || true
+          python -m pytest --version
+          python -c "import kambo; print('kambo from:', kambo.__file__)"
+          pip list | grep -iE "pytest|kambo|asyncio|json-report"
+
+      - name: Diagnose collection
+        run: |
+          python -m pytest --collect-only -q 2>&1 | tail -20
+          echo "---"
+          python -m pytest --collect-only -q 2>&1 | wc -l
+
+      - name: Run pytest (first pass)
+        run: |
+          mkdir -p .reports
+          set +e
+          python -m pytest --json-report --json-report-file=.reports/current.json \
+            -v --tb=short 2>&1 | tee .reports/pytest.log | tail -80
+          pytest_exit=${PIPESTATUS[0]}
+          set -e
+          echo "::notice::pytest exit code: $pytest_exit"
+          echo "pytest_exit=$pytest_exit" >> "$GITHUB_ENV"
+
+      - name: Upload pytest log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: .reports/pytest.log
+          retention-days: 7
+
+      - name: Verify pytest produced a valid report
+        run: |
+          dump_log() {
+            echo ""
+            echo "===== FULL pytest.log (last 300 lines) ====="
+            tail -300 .reports/pytest.log 2>/dev/null || echo "(no log file)"
+            echo "===== end pytest.log ====="
+          }
+          if [ ! -f .reports/current.json ]; then
+            echo "::error::pytest did not produce .reports/current.json (pytest exit code: $pytest_exit)."
+            dump_log
+            exit 1
+          fi
+          if ! python -c "
+          import json, sys, os
+          data = json.load(open('.reports/current.json'))
+          tests = data.get('tests')
+          summary = data.get('summary', {})
+          exit_code = os.environ.get('pytest_exit', '?')
+          if not isinstance(tests, list):
+              print(f'::error::tests key missing or not a list in current.json')
+              sys.exit(1)
+          if len(tests) == 0:
+              print(f'::error::pytest collected {summary.get(\"collected\", 0)} tests but ran 0. exit_code={exit_code} summary={summary}')
+              sys.exit(1)
+          print(f'OK — {len(tests)} tests in report. summary={summary}')
+          "; then
+            dump_log
+            exit 1
+          fi
+
+      - name: Re-run failed tests for flake detection
+        run: |
+          # Re-run only the tests that failed so we can detect flakes cheaply.
+          python -c "
+          import json, pathlib
+          data = json.loads(pathlib.Path('.reports/current.json').read_text())
+          ids = [t['nodeid'] for t in data.get('tests', []) if t.get('outcome') in ('failed','error')]
+          pathlib.Path('.reports/failed-ids.txt').write_text('\n'.join(ids))
+          print(f'{len(ids)} failed tests to re-run')
+          "
+          if [ -s .reports/failed-ids.txt ]; then
+            python -m pytest --json-report --json-report-file=.reports/rerun.json -q \
+              $(cat .reports/failed-ids.txt) || true
+          else
+            echo '{"tests": []}' > .reports/rerun.json
+          fi
+
+      - name: Download baseline from main
+        id: baseline
+        continue-on-error: true
+        uses: dawidd6/action-download-artifact@v6
+        with:
+          workflow: tests.yml
+          name: baseline-report
+          branch: main
+          path: .reports/baseline/
+          if_no_artifact_found: warn
+
+      - name: Analyze regressions
+        id: analyze
+        run: |
+          baseline_arg=""
+          if [ -f .reports/baseline/report.json ]; then
+            baseline_arg="--baseline .reports/baseline/report.json"
+          else
+            echo "No baseline available — skipping regression comparison."
+          fi
+          set +e
+          python -m tests.regression_validator analyze \
+            --current .reports/current.json \
+            --rerun .reports/rerun.json \
+            $baseline_arg \
+            --markdown .reports/summary.md
+          validator_exit=$?
+          set -e
+          echo "validator_exit=$validator_exit" >> "$GITHUB_OUTPUT"
+          if [ -f .reports/summary.md ]; then
+            cat .reports/summary.md >> "$GITHUB_STEP_SUMMARY"
+          else
+            # The validator should always emit summary.md (even on error),
+            # so this branch only fires if the validator itself crashed
+            # before reaching its error handler.
+            echo "::error::Regression validator did not emit .reports/summary.md (exit code: $validator_exit)"
+            echo "Regression validator crashed before producing a summary (exit code: $validator_exit)." \
+              >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Comment on PR
+        if: github.event_name == 'pull_request'
+        uses: marocchino/sticky-pull-request-comment@v2
+        with:
+          header: regression-validator
+          path: .reports/summary.md
+
+      - name: Upload reports
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: regression-reports
+          path: .reports/
+          retention-days: 14
+
+      - name: Fail on real regression
+        # validator exit codes:
+        #   0 = clean (or only informational categories)
+        #   1 = pre-existing failures (don't block PR)
+        #   2 = regression detected
+        #   3 = validator tooling error (missing/corrupt report)
+        if: steps.analyze.outputs.validator_exit == '2' || steps.analyze.outputs.validator_exit == '3'
+        run: |
+          case "${{ steps.analyze.outputs.validator_exit }}" in
+            2) echo "::error::Regression detected — see PR comment for details." ;;
+            3) echo "::error::Regression validator encountered a tooling error — see step summary." ;;
+          esac
+          exit 1

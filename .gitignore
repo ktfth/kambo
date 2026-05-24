@@ -20,4 +20,5 @@ htmlcov/
 .agents/
 .playwright-mcp/
 reports/
+.reports/
 tmp/
