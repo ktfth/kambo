@@ -55,11 +55,14 @@ class TestEvidenceChain:
         assert chain.confidence == Confidence.CONFIRMED
         assert chain.total_weight == 2.0
 
-    def test_confidence_pct_capped_at_100(self) -> None:
+    def test_confidence_pct_confirmed_never_reaches_100(self) -> None:
+        # Certainty is never absolute — CONFIRMED caps at 99% (not 100)
         chain = EvidenceChain()
         chain = chain.add("s1", "src", weight=1.5)
         chain = chain.add("s2", "src", weight=1.5)
-        assert chain.confidence_pct == 100  # capped
+        pct = chain.confidence_pct
+        assert pct >= 85, f"CONFIRMED should be >= 85%, got {pct}%"
+        assert pct <= 99, f"CONFIRMED should never reach 100%, got {pct}%"
 
     def test_add_fp_check_returns_new_chain(self) -> None:
         chain = EvidenceChain()

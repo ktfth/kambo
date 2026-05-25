@@ -213,8 +213,18 @@ def validate_xss(
     if payload_idx < 0:
         return chain  # Payload was encoded after earlier check passed
     before_payload = raw_output[:payload_idx]
-    in_script = "<script" in before_payload[max(0, len(before_payload) - 500):]
-    in_comment = "<!--" in before_payload[max(0, len(before_payload) - 200):]
+    window = before_payload[max(0, len(before_payload) - 500):]
+
+    # Count unclosed <script> tags — a closed tag means the payload is NOT inside it
+    script_opens = len(re.findall(r"<script\b", window, re.IGNORECASE))
+    script_closes = len(re.findall(r"</script\s*>", window, re.IGNORECASE))
+    in_script = script_opens > script_closes
+
+    # Comment detection: check if most recent <!-- is not closed by -->
+    comment_window = before_payload[max(0, len(before_payload) - 200):]
+    last_open = comment_window.rfind("<!--")
+    last_close = comment_window.rfind("-->")
+    in_comment = last_open > last_close
 
     if in_script:
         chain = chain.add(
@@ -342,10 +352,12 @@ def validate_ssrf(
     if re.search(r"(invalid url|bad request|url not allowed|blocked)", body_lower):
         chain = chain.add_fp_check("Server rejected the URL — input validation in place")
 
-    # Status code check (weak signal alone)
-    if status_code in ("200", "301", "302"):
+    # Status code check (weak signal alone) — 307/308 are permanent/temporary redirects
+    # that can indicate the server is fetching and forwarding the internal resource
+    if status_code in ("200", "301", "302", "307", "308"):
+        redirect_note = " (redirect — may indicate server-side fetch)" if status_code in ("301", "302", "307", "308") else ""
         chain = chain.add(
-            signal=f"HTTP {status_code} returned for internal payload: {payload[:100]}",
+            signal=f"HTTP {status_code} returned for internal payload: {payload[:100]}{redirect_note}",
             source="ssrf_probe",
             weight=0.2,
         )
@@ -1476,5 +1488,210 @@ def validate_deserialization(
                 source="deserialization_time_based",
                 weight=1.5 if delay > 8000 else 1.0,
             )
+
+    return chain
+
+
+# ---------------------------------------------------------------------------
+# validate_graphql — GraphQL Introspection & Injection
+# ---------------------------------------------------------------------------
+
+_GRAPHQL_INTROSPECTION_SIGNATURES: list[str] = [
+    r'"__schema"\s*:',                    # introspection response
+    r'"__types"\s*:',                     # type listing
+    r'"queryType"\s*:.*"name"',           # schema root types
+    r'"mutationType"\s*:',                # mutation support exposed
+    r'"directives"\s*:\s*\[',             # directives listing
+]
+
+_GRAPHQL_ERROR_SIGNATURES: list[tuple[str, str, float]] = [
+    (r'"errors"\s*:.*"extensions"\s*:.*"code"', "GraphQL structured error with code — endpoint confirmed", 0.4),
+    # Use \W+ to handle both plain quotes and JSON-escaped \" sequences in raw HTTP bodies
+    (r"Cannot query field\W+(\w+)\W+on type", "Field-level error leaks schema info", 0.6),
+    (r"Unknown argument\W+(\w+)", "Argument error reveals accepted fields", 0.5),
+    (r"Variable.*must not be null", "Null variable error leaks input type", 0.3),
+    (r"Did you mean\W+(\w+)", "Suggestion error fully leaks field names", 0.8),
+]
+
+_GRAPHQL_INJECTION_SIGNATURES: list[tuple[str, str, float]] = [
+    (r"syntax error.*unexpected", "GraphQL syntax error from injected chars", 0.3),
+    (r"Expected.*got.*<EOF>", "Incomplete query — injection point confirmed", 0.5),
+    (r"(sql|mongo|redis).*error", "Database error via GraphQL injection", 1.2),
+    (r"Internal\s+Server\s+Error.*graphql", "Internal error exposed via GraphQL", 0.6),
+]
+
+
+def validate_graphql(
+    output: str,
+    introspection_response: str = "",
+    error_response: str = "",
+    injection_response: str = "",
+    baseline_body: str = "",
+) -> EvidenceChain:
+    """Validate GraphQL security issues: introspection enabled, info disclosure, injection.
+
+    Three separate attack vectors:
+    1. Introspection enabled — leaks full schema, used for targeted attacks
+    2. Error verbosity — field names, types, and suggestions leak from errors
+    3. Query injection — injected chars cause parse/DB errors
+
+    Args:
+        output: General tool output (combines all responses if not split)
+        introspection_response: Response to an __schema introspection query
+        error_response: Response to an intentionally malformed query
+        injection_response: Response to an injection payload (e.g., ' OR 1=1)
+        baseline_body: Normal query response for comparison
+    """
+    chain = EvidenceChain()
+
+    # Combine all available response data
+    all_output = "\n".join(filter(None, [output, introspection_response, error_response, injection_response]))
+
+    if not all_output.strip():
+        return chain.add_fp_check("No GraphQL response data — endpoint may not exist")
+
+    # FP check: not a GraphQL endpoint
+    if re.search(r"(404 not found|cannot (get|post)|method not allowed)", all_output, re.IGNORECASE):
+        if not re.search(r'"data"\s*:|"errors"\s*:', all_output):
+            return chain.add_fp_check("No GraphQL response structure — likely not a GraphQL endpoint")
+
+    # FP check: introspection explicitly disabled
+    if re.search(r"(introspection.*disabled|introspection.*not.*allowed|GraphQL introspection is not allowed)", all_output, re.IGNORECASE):
+        chain = chain.add_fp_check("Introspection explicitly disabled — properly configured")
+
+    # --- Introspection detection ---
+    if introspection_response:
+        for pattern in _GRAPHQL_INTROSPECTION_SIGNATURES:
+            if re.search(pattern, introspection_response, re.IGNORECASE):
+                chain = chain.add(
+                    signal="GraphQL introspection enabled — full schema exposed",
+                    source="graphql_introspection",
+                    raw_data=introspection_response[:500],
+                    weight=1.0,
+                )
+                # Count types exposed — more types = bigger attack surface
+                type_count_match = re.findall(r'"name"\s*:\s*"[A-Z]\w+"', introspection_response)
+                if len(type_count_match) > 5:
+                    chain = chain.add(
+                        signal=f"Schema exposes {len(type_count_match)} named types — large attack surface",
+                        source="graphql_introspection",
+                        weight=0.5,
+                    )
+                break
+
+    # --- Error verbosity detection ---
+    if error_response:
+        for pattern, description, weight in _GRAPHQL_ERROR_SIGNATURES:
+            if re.search(pattern, error_response, re.IGNORECASE):
+                chain = chain.add(
+                    signal=description,
+                    source="graphql_error_analysis",
+                    raw_data=_extract_context(error_response, pattern),
+                    weight=weight,
+                )
+
+    # --- Injection detection ---
+    if injection_response:
+        for pattern, description, weight in _GRAPHQL_INJECTION_SIGNATURES:
+            if re.search(pattern, injection_response, re.IGNORECASE):
+                chain = chain.add(
+                    signal=description,
+                    source="graphql_injection",
+                    raw_data=_extract_context(injection_response, pattern),
+                    weight=weight,
+                )
+                break
+
+    # Baseline comparison
+    if baseline_body and output and output.strip() != baseline_body.strip():
+        if abs(len(output) - len(baseline_body)) > 200:
+            chain = chain.add(
+                signal="Response differs significantly from baseline",
+                source="graphql_baseline_comparison",
+                weight=0.2,
+            )
+
+    return chain
+
+
+# ---------------------------------------------------------------------------
+# validate_race_condition — TOCTOU / Race Condition
+# ---------------------------------------------------------------------------
+
+def validate_race_condition(
+    responses: list[tuple[str, int, str]],
+    expected_unique: int = 1,
+    action: str = "",
+    baseline_count: int | None = None,
+) -> EvidenceChain:
+    """Validate race condition / TOCTOU findings.
+
+    A race condition is confirmed when parallel requests cause a state change
+    that should only happen once (e.g., coupon used twice, balance deducted once
+    but credit applied multiple times).
+
+    Args:
+        responses: List of (status_code_str, body_hash_int, body_preview) tuples
+                   from parallel requests sent simultaneously
+        expected_unique: How many unique success responses are expected (usually 1)
+        action: Description of the action being raced (for signal context)
+        baseline_count: How many times the action should succeed (usually 1)
+    """
+    chain = EvidenceChain()
+
+    if not responses:
+        return chain.add_fp_check("No responses — race condition test produced no data")
+
+    total = len(responses)
+    success_responses = [r for r in responses if r[0] in ("200", "201", "204")]
+    error_responses = [r for r in responses if r[0] in ("409", "429", "400", "403")]
+
+    # FP check: all requests failed (server properly serialized)
+    if not success_responses:
+        chain = chain.add_fp_check(
+            f"All {total} parallel requests failed — server properly handles concurrent requests"
+        )
+        return chain
+
+    # FP check: exactly expected successes, rest failed — proper behavior
+    if len(success_responses) <= expected_unique and len(error_responses) >= total - expected_unique - 1:
+        chain = chain.add_fp_check(
+            f"Only {len(success_responses)}/{total} requests succeeded — concurrency handled correctly"
+        )
+        return chain
+
+    # Primary signal: more successes than expected
+    extra_successes = len(success_responses) - expected_unique
+    if extra_successes > 0:
+        chain = chain.add(
+            signal=f"Race condition: {len(success_responses)}/{total} requests succeeded "
+                   f"(expected max {expected_unique}){' for: ' + action if action else ''}",
+            source="race_condition_analysis",
+            weight=1.0 + min(1.0, extra_successes * 0.2),  # more extras = stronger signal
+        )
+
+    # Check response body variance — identical success bodies = same resource hit twice
+    body_hashes = [r[1] for r in success_responses]
+    unique_hashes = set(body_hashes)
+    if len(unique_hashes) == 1 and len(success_responses) > 1:
+        chain = chain.add(
+            signal=f"All {len(success_responses)} success responses are identical — same state applied multiple times",
+            source="race_condition_identity_check",
+            weight=0.8,
+        )
+    elif len(unique_hashes) > 1:
+        chain = chain.add(
+            signal=f"Varied responses across {len(success_responses)} successes — concurrent state mutation confirmed",
+            source="race_condition_variance_check",
+            weight=0.5,
+        )
+
+    # Baseline comparison: more successes than baseline implies race exploit
+    if baseline_count is not None and len(success_responses) > baseline_count:
+        chain = chain.add(
+            signal=f"Parallel requests produced {len(success_responses)} successes vs baseline {baseline_count}",
+            source="race_condition_baseline",
+            weight=0.5,
+        )
 
     return chain

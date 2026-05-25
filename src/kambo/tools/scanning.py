@@ -6,6 +6,7 @@ from kambo.docker_runner import get_runner
 from kambo.models import Phase
 from kambo.parsers import parse_ffuf, parse_nmap
 from kambo.parsers.generic_parser import parse_json_output
+from kambo.rate_limiter import get_rate_limiter
 from kambo.scope import validate_scope
 
 
@@ -90,6 +91,10 @@ async def scan_directories(
 ) -> dict:
     """Web directory and file fuzzing with ffuf.
 
+    Integrates WAF detection and adaptive rate limiting — if a WAF is detected
+    from a probe response, the scan rate is automatically reduced to avoid
+    triggering blocks.
+
     Args:
         target: Base URL to fuzz (e.g., https://example.com)
         wordlist: Path to wordlist inside container
@@ -98,15 +103,51 @@ async def scan_directories(
     """
     validate_scope(target)
     runner = get_runner()
+    limiter = get_rate_limiter()
 
     url = target if target.startswith("http") else f"https://{target}"
+
+    # WAF probe: check a known-good path before fuzzing at full speed
+    probe_cmd = f'curl -s -D - "{url}/" 2>/dev/null | head -30'
+    probe_result = await runner.run(probe_cmd, "scan_directories_waf_probe", target, Phase.SCANNING, timeout=10)
+
+    # Record the probe response through the rate limiter to detect WAF/blocking
+    probe_analysis = limiter.record_request(
+        target,
+        response_body=probe_result.raw_output,
+        headers=probe_result.raw_output[:500],  # headers are in the first portion
+    )
+
+    # Adapt threading based on WAF detection
+    threads = 10
+    extra_flags = ""
+    waf_name = probe_analysis.get("waf_detected") or ""
+    if waf_name:
+        threads = 2
+        extra_flags = "-p 0.5"  # 500ms delay between requests — be polite to WAF
+    elif probe_analysis.get("is_blocked"):
+        threads = 3
+        extra_flags = "-p 0.2"
+
     ext_flag = f"-e {extensions}" if extensions else ""
-    cmd = f"ffuf -u {url}/FUZZ -w {wordlist} -mc {match_codes} {ext_flag} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
+    cmd = (
+        f"ffuf -u {url}/FUZZ -w {wordlist} -mc {match_codes} "
+        f"{ext_flag} -t {threads} {extra_flags} "
+        f"-o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
+    )
 
     result = await runner.run(cmd, "scan_directories", target, Phase.SCANNING, timeout=120)
     parsed = parse_ffuf(result.raw_output)
 
-    return {"target": target, "scan_type": "directory_fuzz", **parsed}
+    return {
+        "target": target,
+        "scan_type": "directory_fuzz",
+        "waf_detected": bool(waf_name),
+        "waf_name": waf_name,
+        "rate_adapted": threads < 10,
+        "evasion_tips": probe_analysis.get("evasion_tips", []),
+        **parsed,
+    }
 
 
 async def scan_vhosts(

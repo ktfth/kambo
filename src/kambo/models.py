@@ -86,8 +86,24 @@ class EvidenceChain(BaseModel):
 
     @property
     def confidence_pct(self) -> int:
-        """0-100 percentage representing confidence strength."""
-        return min(100, int(self.total_weight * 40))
+        """0-100 percentage representing confidence strength within tier.
+
+        Mapping:
+          TENTATIVE (weight 0.0–0.99): 10–39%   — single signal, high FP risk
+          FIRM      (weight 1.0–1.99): 50–79%   — multiple signals, reportable with caveats
+          CONFIRMED (weight 2.0+):     85–99%   — exploit-grade, ready to submit
+        """
+        w = self.total_weight
+        if w >= 2.0:
+            # Confirmed tier: starts at 85, caps at 99
+            return min(99, 85 + int((w - 2.0) * 7))
+        if w >= 1.0:
+            # Firm tier: 50–79, scales within the 1.0–2.0 range
+            return 50 + int((w - 1.0) * 29)
+        # Tentative tier: 10–39 (0.0 weight = 0% — no evidence at all)
+        if w == 0:
+            return 0
+        return max(10, min(39, 10 + int(w * 29)))
 
     def add(self, signal: str, source: str, raw_data: str = "", weight: float = 1.0) -> EvidenceChain:
         """Return a new chain with the evidence item appended (immutable)."""
