@@ -159,11 +159,34 @@ def validate_sqli(raw_output: str) -> EvidenceChain:
 # XSS validation
 # ---------------------------------------------------------------------------
 
+_SPA_FRAMEWORK_MARKERS = [
+    "__NEXT_DATA__",          # Next.js
+    "__NUXT__",               # Nuxt.js
+    "ng-app",                 # Angular
+    "data-reactroot",         # React
+    'id="__next"',            # Next.js root div
+    'id="app"',               # Vue.js
+    "window.__remixContext",  # Remix
+]
+
+_WAF_SIGNATURES = [
+    "cloudflare",
+    "akamai",
+    "imperva",
+    "incapsula",
+    "sucuri",
+    "aws-waf",
+    "mod_security",
+    "wordfence",
+]
+
+
 def validate_xss(
     raw_output: str,
     payload: str,
     parameter: str,
     reflected_context: str = "",
+    response_headers: str = "",
 ) -> EvidenceChain:
     """Validate XSS based on reflection analysis.
 
@@ -171,8 +194,27 @@ def validate_xss(
     1. Payload reflected in response (weight 0.3)
     2. Payload is in an executable context — not inside an attribute or comment (weight 0.7)
     3. No output encoding detected (weight 0.5)
+    4. WAF not blocking execution (downgrade if WAF present)
+    5. SPA framework not auto-escaping (warn if SPA detected)
     """
     chain = EvidenceChain()
+
+    # Detect WAF from response headers or body
+    headers_and_body = (response_headers + raw_output).lower()
+    waf_detected = [w for w in _WAF_SIGNATURES if w in headers_and_body]
+    if waf_detected:
+        chain = chain.add_fp_check(
+            f"WAF detected ({', '.join(waf_detected)}) — payload may be blocked"
+            " in browser even if reflected in curl response"
+        )
+
+    # Detect SPA frameworks — they auto-escape by default
+    spa_detected = [m for m in _SPA_FRAMEWORK_MARKERS if m in raw_output]
+    if spa_detected:
+        chain = chain.add_fp_check(
+            f"SPA framework detected ({spa_detected[0]}) — modern frameworks"
+            " auto-escape output. Verify execution in browser."
+        )
 
     # Check if payload is actually reflected
     if payload not in raw_output:
@@ -202,10 +244,13 @@ def validate_xss(
             chain = chain.add_fp_check("Payload appears HTML-encoded in response — likely sanitized")
             return chain
 
+    # Downgrade weight when WAF or SPA detected — curl reflection doesn't
+    # prove browser exploitation behind WAF/auto-escape.
+    encoding_weight = 0.2 if (waf_detected or spa_detected) else 0.5
     chain = chain.add(
         signal="Payload reflected without encoding",
         source="encoding_check",
-        weight=0.5,
+        weight=encoding_weight,
     )
 
     # Check context: is it inside a tag, attribute, script block, or comment?
@@ -216,11 +261,15 @@ def validate_xss(
     in_script = "<script" in before_payload[max(0, len(before_payload) - 500):]
     in_comment = "<!--" in before_payload[max(0, len(before_payload) - 200):]
 
+    context_weight = 0.5
+    if waf_detected or spa_detected:
+        context_weight = 0.2
+
     if in_script:
         chain = chain.add(
             signal="Reflection occurs inside <script> block — high XSS probability",
             source="context_analysis",
-            weight=0.7,
+            weight=0.7 if not waf_detected else 0.4,
         )
     elif in_comment:
         chain = chain.add_fp_check("Reflection is inside HTML comment — not exploitable")
@@ -228,7 +277,7 @@ def validate_xss(
         chain = chain.add(
             signal="Reflection in HTML body context",
             source="context_analysis",
-            weight=0.5,
+            weight=context_weight,
         )
 
     return chain
@@ -317,10 +366,14 @@ def validate_cors(
 # ---------------------------------------------------------------------------
 
 _CLOUD_METADATA_SIGNATURES = {
-    "aws": ["ami-id", "instance-id", "iam", "security-credentials", "meta-data"],
+    "aws": ["ami-id", "instance-id", "iam/", "security-credentials", "meta-data/"],
     "gcp": ["computeMetadata", "project-id", "service-accounts"],
-    "azure": ["compute", "vmId", "subscriptionId"],
+    "azure": ["vmId", "subscriptionId", "azureenvironment"],
 }
+
+# Short tokens that cause FP via substring match (e.g. "iam" in "enviamos").
+# These require word-boundary matching instead of simple `in`.
+_SHORT_METADATA_TOKENS = frozenset({"iam", "compute"})
 
 
 def validate_ssrf(
@@ -353,16 +406,31 @@ def validate_ssrf(
         chain = chain.add_fp_check(f"Non-success status {status_code} — likely blocked")
         return chain
 
-    # Check for cloud metadata content
+    # Check for cloud metadata content.
+    # Use word-boundary matching for short tokens to avoid substring FPs
+    # (e.g. "iam" matching "enviamos" in Portuguese pages).
+    # Require ≥2 distinct signatures to reach high weight.
     for provider, signatures in _CLOUD_METADATA_SIGNATURES.items():
-        matches = [sig for sig in signatures if sig.lower() in body_lower]
+        matches: list[str] = []
+        for sig in signatures:
+            sig_lower = sig.lower()
+            if sig_lower in _SHORT_METADATA_TOKENS:
+                if re.search(rf"\b{re.escape(sig_lower)}\b", body_lower):
+                    matches.append(sig)
+            elif sig_lower in body_lower:
+                matches.append(sig)
         if matches:
+            weight = 1.5 if len(matches) >= 2 else 0.5
             chain = chain.add(
                 signal=f"Cloud metadata ({provider}) content detected: {', '.join(matches)}",
                 source="ssrf_content_analysis",
                 raw_data=response_body[:1000],
-                weight=1.5,
+                weight=weight,
             )
+            if len(matches) < 2:
+                chain = chain.add_fp_check(
+                    f"Only {len(matches)} metadata signature(s) — weak signal, may be page content"
+                )
             break
 
     # Check for internal service indicators
@@ -1278,8 +1346,17 @@ def validate_ssti(
         if re.search(pattern, output, re.IGNORECASE):
             return chain.add_fp_check(f"Template engine rejected payload: {pattern}")
 
-    # Primary signal: expected render found
+    # Primary signal: expected render found.
+    # CRITICAL: if the expected render already exists in the baseline response,
+    # it's natural page content (e.g. "49" in product IDs, prices, SVG paths),
+    # NOT evidence of template rendering.
     if expected_render and expected_render in output:
+        if baseline_body and expected_render in baseline_body:
+            chain = chain.add_fp_check(
+                f"Expected render {expected_render!r} already present in baseline"
+                " — likely natural page content, not template evaluation"
+            )
+            return chain
         chain = chain.add(
             signal=f"Template expression rendered: {payload!r} → {expected_render!r}",
             source="ssti_render_analysis",

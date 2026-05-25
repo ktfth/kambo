@@ -112,7 +112,11 @@ async def vuln_xss(
             cmd = f'curl -s -D - "{url}{sep}q={payload}" 2>/dev/null'
 
         result = await runner.run(cmd, "vuln_xss", target, Phase.VULN_ANALYSIS, timeout=30)
-        chain = validate_xss(result.raw_output, payload, parameter or "q")
+        # Split headers from body so WAF detection can check headers separately
+        parts = result.raw_output.split("\r\n\r\n", 1)
+        resp_headers = parts[0] if len(parts) > 1 else ""
+        resp_body = parts[1] if len(parts) > 1 else result.raw_output
+        chain = validate_xss(resp_body, payload, parameter or "q", response_headers=resp_headers)
 
         if chain.total_weight > best_chain.total_weight:
             best_chain = chain

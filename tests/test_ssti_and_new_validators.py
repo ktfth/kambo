@@ -102,6 +102,34 @@ class TestValidateSsti:
         )
         assert chain.total_weight > 0
 
+    def test_expected_render_in_baseline_is_fp(self) -> None:
+        """If '49' already exists in the baseline, it's natural content, not SSTI."""
+        page_content = (
+            '<html><body>Country: {"id":"49","name":"Congo"}'
+            " Price: R$49.90</body></html>"
+        )
+        chain = validate_ssti(
+            output=page_content,
+            payload="{{7*7}}",
+            expected_render="49",
+            baseline_body=page_content,
+        )
+        assert chain.total_weight == 0.0
+        assert any("baseline" in fp.lower() for fp in chain.false_positive_checks)
+
+    def test_expected_render_absent_from_baseline_is_real(self) -> None:
+        """If '49' is NOT in baseline but IS in payload response, it's real SSTI."""
+        baseline = "<html><body>Normal page without the number</body></html>"
+        output = "<html><body>Result: 49</body></html>"
+        chain = validate_ssti(
+            output=output,
+            payload="{{7*7}}",
+            expected_render="49",
+            baseline_body=baseline,
+        )
+        assert chain.total_weight >= 2.0
+        assert chain.confidence == Confidence.CONFIRMED
+
     def test_error_patterns_gated_by_error_based_flag(self) -> None:
         """Spring/Twig error patterns only contribute weight when error_based=True."""
         # Output has org.springframework but NOT the literal payload — no FP reflection guard
