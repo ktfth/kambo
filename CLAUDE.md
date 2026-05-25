@@ -41,6 +41,13 @@ When the user's request matches an available skill, invoke it via the Skill tool
 | Code review, check quality, review kambo | `/kambo-review` |
 | Confidence check, should I report, impact analysis, question findings | `/kambo-confidence` |
 | One-liner, recipe, KingOfBugBounty, OFJAAAH, certstream, technique catalog | `/kambo-kingrecon` |
+| Think like defense, defender perspective, blind spots, what they missed, lateral vectors, assumption gaps | `/kambo-think-like-defense` |
+| JS analysis, client-side secrets, source maps, hidden endpoints, extract from JS | `/kambo-js-hunt` |
+| Business logic, logic bugs, flow bypass, price manipulation, workflow abuse | `/kambo-logic-hunt` |
+| WAF bypass, WAF blocking, evade, cloudflare bypass, payload blocked | `/kambo-waf-evade` |
+| Chain exploits, multi-step, combine findings, escalate impact, attack chain | `/kambo-chain` |
+| Race condition, TOCTOU, concurrent requests, double spend, timing attack | `/kambo-race` |
+| GraphQL, introspection, query batching, nested queries, graphql security | `/kambo-graphql` |
 | Post social, publicar Threads, post do dia, divulgar kambo | `/kambo-social` |
 
 ## Self-Improvement Loop

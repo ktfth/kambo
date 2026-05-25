@@ -36,8 +36,9 @@ Run in parallel where possible:
 
 **CHECKPOINT**: After recon, run `report_metrics`.
 - If 0 subdomains found → pivot to direct scanning
-- If WAF detected → log pitfall, adjust approach
+- If WAF detected → run `/kambo-waf-evade` to profile and bypass
 - If >100 subdomains → prioritize by wildcard detection
+- Run `/kambo-think-like-defense` with recon data to identify blind spots
 
 ## Phase 2: Active Scanning
 
@@ -53,8 +54,10 @@ Priority order:
 
 **ADAPTIVE PIVOT**:
 - IF Swagger found → prioritize API security tests (BOLA, BFLA)
+- IF GraphQL endpoint found → run `/kambo-graphql`
 - IF .git exposed → run `cloud_secret_scan`
 - IF admin panel found → focus auth bypass
+- IF SPA detected (React/Vue/Angular/Next.js) → run `/kambo-js-hunt`
 
 ## Phase 3: Vulnerability Analysis
 
@@ -69,6 +72,8 @@ Run based on recon intelligence:
 4. `vuln_ssrf` if internal params found
 5. `vuln_idor` on authenticated endpoints
 6. `api_test_bola` + `api_test_bfla` on API targets
+7. `/kambo-logic-hunt` on complex business workflows
+8. `/kambo-race` on state-changing endpoints (payments, coupons, transfers)
 
 **EVIDENCE GATE**: After each tool, check confidence:
 - TENTATIVE → cross-validate with second tool before proceeding
@@ -85,6 +90,8 @@ Only exploit findings with confidence >= FIRM:
 1. `exploit_sqli` — extract data to prove impact
 2. `exploit_ssrf` — access internal resources
 3. `exploit_password_spray` — if default creds suspected
+
+4. `/kambo-chain` — connect multiple findings for maximum impact
 
 **STOP**: Never exploit TENTATIVE findings. Cross-validate first.
 
