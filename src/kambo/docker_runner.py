@@ -138,8 +138,9 @@ class DockerRunner:
     def _exec_command(self, command: str, timeout: int) -> Any:
         """Synchronous command execution in container."""
         assert self._container is not None
+        timed_cmd = f"timeout {timeout} bash -c {__import__('shlex').quote(command)}"
         return self._container.exec_run(
-            cmd=["bash", "-c", command],
+            cmd=["bash", "-c", timed_cmd],
             demux=False,
             tty=False,
         )

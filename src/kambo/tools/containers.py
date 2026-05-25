@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kambo.docker_runner import get_runner
 from kambo.models import Phase
+from kambo.sanitize import shell_quote
 from kambo.scope import validate_scope
 
 
@@ -52,7 +53,7 @@ async def container_image_scan(
     validate_scope(target)
     runner = get_runner()
 
-    cmd = f"trivy image --format json --severity HIGH,CRITICAL {image} 2>/dev/null"
+    cmd = f"trivy image --format json --severity HIGH,CRITICAL {shell_quote(image)} 2>/dev/null"
     result = await runner.run(cmd, "container_image_scan", target, Phase.VULN_ANALYSIS, timeout=180)
 
     import json
@@ -89,13 +90,12 @@ async def k8s_rbac_enum(
     validate_scope(target)
     runner = get_runner()
 
-    auth_header = f'-H "Authorization: Bearer {token}"' if token else ""
-    server = api_server or f"https://{target}:6443"
+    auth_header = f'-H "Authorization: Bearer "{shell_quote(token)}' if token else ""
+    server = shell_quote(api_server or f"https://{target}:6443")
 
     cmd = f'curl -sk {auth_header} {server}/api/v1/namespaces 2>/dev/null | jq ".items[].metadata.name" 2>/dev/null'
     result = await runner.run(cmd, "k8s_rbac_enum", target, Phase.POST_EXPLOITATION, timeout=30)
 
-    # Check what we can do
     cmd2 = f'curl -sk {auth_header} {server}/apis/authorization.k8s.io/v1/selfsubjectaccessreviews -X POST -H "Content-Type: application/json" -d \'{{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{{"resourceAttributes":{{"verb":"create","resource":"pods"}}}}}}\' 2>/dev/null'
     result2 = await runner.run(cmd2, "k8s_rbac_check", target, Phase.POST_EXPLOITATION, timeout=15)
 

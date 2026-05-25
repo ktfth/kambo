@@ -8,6 +8,7 @@ import re
 from kambo.docker_runner import get_runner
 from kambo.metrics import get_metrics
 from kambo.models import EvidenceChain, Phase
+from kambo.sanitize import shell_quote
 from kambo.scope import validate_scope
 from kambo.validation import validate_ssrf
 
@@ -52,7 +53,7 @@ async def cloud_imds_test(
 
     for meta_url, description in urls:
         url = target if target.startswith("http") else f"https://{target}"
-        cmd = f'curl -s -D - "{url}?{parameter}={meta_url}" 2>/dev/null'
+        cmd = f'curl -s -D - {shell_quote(f"{url}?{parameter}={meta_url}")} 2>/dev/null'
         result = await runner.run(cmd, "cloud_imds_test", target, Phase.VULN_ANALYSIS, timeout=15)
 
         status_match = re.search(r"HTTP/\d\.?\d?\s+(\d{3})", result.raw_output)
@@ -116,7 +117,7 @@ async def cloud_storage_enum(
     if cloud_provider == "aws":
         for bucket in variations:
             # Check existence and access level
-            cmd = f'curl -s -D - "https://{bucket}.s3.amazonaws.com" 2>/dev/null'
+            cmd = f'curl -s -D - {shell_quote(f"https://{bucket}.s3.amazonaws.com")} 2>/dev/null'
             result = await runner.run(cmd, "cloud_storage_enum", target, Phase.RECON, timeout=10)
 
             status_match = re.search(r"HTTP/\d\.?\d?\s+(\d{3})", result.raw_output)
@@ -146,7 +147,7 @@ async def cloud_storage_enum(
 
     elif cloud_provider == "azure":
         for name in variations:
-            cmd = f'curl -s -D - "https://{name}.blob.core.windows.net/?comp=list" 2>/dev/null'
+            cmd = f'curl -s -D - {shell_quote(f"https://{name}.blob.core.windows.net/?comp=list")} 2>/dev/null'
             result = await runner.run(cmd, "cloud_storage_enum", target, Phase.RECON, timeout=10)
 
             status_match = re.search(r"HTTP/\d\.?\d?\s+(\d{3})", result.raw_output)
@@ -165,7 +166,7 @@ async def cloud_storage_enum(
 
     elif cloud_provider == "gcp":
         for name in variations:
-            cmd = f'curl -s -D - "https://storage.googleapis.com/{name}" 2>/dev/null'
+            cmd = f'curl -s -D - {shell_quote(f"https://storage.googleapis.com/{name}")} 2>/dev/null'
             result = await runner.run(cmd, "cloud_storage_enum", target, Phase.RECON, timeout=10)
 
             status_match = re.search(r"HTTP/\d\.?\d?\s+(\d{3})", result.raw_output)
@@ -213,7 +214,7 @@ async def cloud_secret_scan(
     metrics = get_metrics()
 
     if repo_url:
-        cmd = f"trufflehog git {repo_url} --json 2>/dev/null | head -100"
+        cmd = f"trufflehog git {shell_quote(repo_url)} --json 2>/dev/null | head -100"
     else:
         cmd = f"trufflehog filesystem /output --json 2>/dev/null | head -100"
 

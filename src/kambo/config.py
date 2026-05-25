@@ -36,6 +36,12 @@ class KamboConfig(BaseSettings):
     network_mode: str = "host"
 
 
+_config: KamboConfig | None = None
+
+
 def get_config() -> KamboConfig:
     """Return singleton config instance."""
-    return KamboConfig()
+    global _config
+    if _config is None:
+        _config = KamboConfig()
+    return _config

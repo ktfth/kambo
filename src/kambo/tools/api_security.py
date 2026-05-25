@@ -13,15 +13,17 @@ import re
 from kambo.docker_runner import get_runner
 from kambo.metrics import get_metrics
 from kambo.models import EvidenceChain, Phase
+from kambo.sanitize import shell_quote
 from kambo.scope import validate_scope
 from kambo.validation import HttpResponse, validate_bfla
 
 
 async def _curl_full(runner, url: str, token: str, tool_name: str, target: str) -> tuple[str, str, str]:
     """Execute curl and return (status_code, body, raw_output)."""
+    auth_header = f'-H "Authorization: Bearer "{shell_quote(token)}' if token else ""
     cmd = (
-        f'curl -s -D - -H "Authorization: Bearer {token}" '
-        f'"{url}" 2>/dev/null'
+        f'curl -s -D - {auth_header} '
+        f'{shell_quote(url)} 2>/dev/null'
     )
     result = await runner.run(cmd, tool_name, target, Phase.VULN_ANALYSIS, timeout=15)
     raw = result.raw_output
@@ -183,7 +185,7 @@ async def api_test_auth(
 
     if "jwt_weak_secret" in checks and token:
         from kambo.validation import validate_jwt
-        cmd = f"jwt_tool '{token}' -C -p 'secret' -p 'password' -p '123456' -p 'admin' 2>/dev/null"
+        cmd = f"jwt_tool {shell_quote(token)} -C -p 'secret' -p 'password' -p '123456' -p 'admin' 2>/dev/null"
         result = await runner.run(cmd, "api_test_auth_jwt", target, Phase.VULN_ANALYSIS, timeout=30)
 
         jwt_chain = validate_jwt("", result.raw_output)
@@ -306,11 +308,13 @@ async def api_test_bopla(
 
     chain = EvidenceChain()
 
-    # Step 1: Get baseline — normal update without extra fields
+    qt = shell_quote(token)
+    qe = shell_quote(f"{url}{endpoint}")
+    baseline_json = '{"name": "test"}'
     baseline_cmd = (
-        f'curl -s -D - -X PUT -H "Authorization: Bearer {token}" '
+        f'curl -s -D - -X PUT -H "Authorization: Bearer "{qt} '
         f'-H "Content-Type: application/json" '
-        f'-d \'{{"name": "test"}}\' "{url}{endpoint}" 2>/dev/null'
+        f"-d {shell_quote(baseline_json)} {qe} 2>/dev/null"
     )
     baseline_result = await runner.run(baseline_cmd, "api_test_bopla_baseline", target, Phase.VULN_ANALYSIS, timeout=15)
     baseline_parts = baseline_result.raw_output.split("\r\n\r\n", 1)
@@ -318,11 +322,12 @@ async def api_test_bopla(
 
     results = []
     for field in fields:
-        payload = f'{{"name": "test", "{field}": "admin"}}'
+        import json as _json
+        payload = _json.dumps({"name": "test", field: "admin"})
         cmd = (
-            f'curl -s -D - -X PUT -H "Authorization: Bearer {token}" '
+            f'curl -s -D - -X PUT -H "Authorization: Bearer "{qt} '
             f'-H "Content-Type: application/json" '
-            f"-d '{payload}' \"{url}{endpoint}\" 2>/dev/null"
+            f"-d {shell_quote(payload)} {qe} 2>/dev/null"
         )
         result = await runner.run(cmd, "api_test_bopla", target, Phase.VULN_ANALYSIS, timeout=15)
 
@@ -400,8 +405,8 @@ async def api_test_resource(
 
     chain = EvidenceChain()
 
-    # Test baseline rate limit
-    cmd = f'for i in $(seq 1 20); do curl -s -o /dev/null -w "%{{http_code}} " "{url}{endpoint}" 2>/dev/null; done'
+    qu = shell_quote(f"{url}{endpoint}")
+    cmd = f'for i in $(seq 1 20); do curl -s -o /dev/null -w "%{{http_code}} " {qu} 2>/dev/null; done'
     result = await runner.run(cmd, "api_test_resource_baseline", target, Phase.VULN_ANALYSIS, timeout=30)
     baseline_codes = result.raw_output.strip().split()
 
@@ -420,7 +425,7 @@ async def api_test_resource(
         chain = chain.add_fp_check("Rate limiting is in place (429 returned)")
         for header_template in bypass_headers:
             header = header_template.format(i=1)
-            cmd = f'curl -s -o /dev/null -w "%{{http_code}}" -H "{header}" "{url}{endpoint}" 2>/dev/null'
+            cmd = f'curl -s -o /dev/null -w "%{{http_code}}" -H {shell_quote(header)} {qu} 2>/dev/null'
             result = await runner.run(cmd, "api_test_resource_bypass", target, Phase.VULN_ANALYSIS, timeout=10)
             status = result.raw_output.strip()
             bypassed = status not in ("429", "000")
@@ -468,7 +473,8 @@ async def api_test_misconfig(target: str) -> dict:
 
     # CORS — use the proper validation
     from kambo.validation import validate_cors as _validate_cors
-    cmd = f'curl -s -I -H "Origin: https://evil.com" {url} 2>/dev/null'
+    qu2 = shell_quote(url)
+    cmd = f'curl -s -I -H "Origin: https://evil.com" {qu2} 2>/dev/null'
     result = await runner.run(cmd, "api_test_misconfig_cors", target, Phase.VULN_ANALYSIS, timeout=10)
 
     domain_match = re.search(r"https?://([^/]+)", url)
@@ -479,7 +485,7 @@ async def api_test_misconfig(target: str) -> dict:
         chain = chain.add(item.signal, item.source, item.raw_data, item.weight)
 
     # HTTP Methods
-    cmd = f'curl -s -X OPTIONS -I {url} 2>/dev/null | grep -i "allow:"'
+    cmd = f'curl -s -X OPTIONS -I {qu2} 2>/dev/null | grep -i "allow:"'
     result = await runner.run(cmd, "api_test_misconfig_methods", target, Phase.VULN_ANALYSIS, timeout=10)
     allowed = result.raw_output.strip()
     dangerous_methods = [m for m in ["PUT", "DELETE", "PATCH", "TRACE"] if m in allowed.upper()]
@@ -493,7 +499,7 @@ async def api_test_misconfig(target: str) -> dict:
     checks["methods"] = {"allowed": allowed, "dangerous": dangerous_methods}
 
     # Security headers
-    cmd = f'curl -s -I {url} 2>/dev/null'
+    cmd = f'curl -s -I {qu2} 2>/dev/null'
     result = await runner.run(cmd, "api_test_misconfig_headers", target, Phase.VULN_ANALYSIS, timeout=10)
     headers_lower = result.raw_output.lower()
 
@@ -517,7 +523,7 @@ async def api_test_misconfig(target: str) -> dict:
     checks["security_headers"] = {"missing": missing_headers}
 
     # Error handling (trigger error)
-    cmd = f'curl -s "{url}/nonexistent_endpoint_test_12345" 2>/dev/null | head -20'
+    cmd = f'curl -s {shell_quote(f"{url}/nonexistent_endpoint_test_12345")} 2>/dev/null | head -20'
     result = await runner.run(cmd, "api_test_misconfig_errors", target, Phase.VULN_ANALYSIS, timeout=10)
     verbose_indicators = ["traceback", "stack trace", "exception", "debug", "at line", "syntax error"]
     verbose_matches = [ind for ind in verbose_indicators if ind in result.raw_output.lower()]

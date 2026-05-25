@@ -12,6 +12,7 @@ from kambo.docker_runner import get_runner
 from kambo.metrics import get_metrics
 from kambo.models import EvidenceChain, Phase
 from kambo.parsers.generic_parser import parse_json_output
+from kambo.sanitize import shell_quote, validate_severity
 from kambo.scope import validate_scope
 from kambo.validation import (
     HttpResponse,
@@ -47,10 +48,16 @@ async def vuln_sqli(
     runner = get_runner()
     metrics = get_metrics()
 
-    param_flag = f"-p {parameter}" if parameter else ""
+    param_flag = f"-p {shell_quote(parameter)}" if parameter else ""
+    if method not in ("GET", "POST", "PUT", "DELETE", "PATCH"):
+        raise ValueError(f"Invalid HTTP method: {method}")
+    if not (1 <= level <= 5):
+        raise ValueError(f"Invalid sqlmap level: {level}")
+    if not (1 <= risk <= 3):
+        raise ValueError(f"Invalid sqlmap risk: {risk}")
     method_flag = f"--method={method}" if method != "GET" else ""
     cmd = (
-        f"sqlmap -u '{target}' {param_flag} {method_flag} --batch "
+        f"sqlmap -u {shell_quote(target)} {param_flag} {method_flag} --batch "
         f"--level={level} --risk={risk} --dbs --threads=4 "
         f"--output-dir=/tmp/sqlmap 2>/dev/null | tail -120"
     )
@@ -102,14 +109,13 @@ async def vuln_xss(
 
     best_chain = EvidenceChain()
 
+    qu = shell_quote(url)
     for payload in payloads:
-        # Use curl with full response to analyze context
         if parameter:
-            cmd = f'curl -s -D - "{url}" -d "{parameter}={payload}" 2>/dev/null'
+            cmd = f'curl -s -D - {qu} -d {shell_quote(f"{parameter}={payload}")} 2>/dev/null'
         else:
-            # Try as query string
             sep = "&" if "?" in url else "?"
-            cmd = f'curl -s -D - "{url}{sep}q={payload}" 2>/dev/null'
+            cmd = f'curl -s -D - {shell_quote(f"{url}{sep}q={payload}")} 2>/dev/null'
 
         result = await runner.run(cmd, "vuln_xss", target, Phase.VULN_ANALYSIS, timeout=30)
         # Split headers from body so WAF detection can check headers separately
@@ -157,8 +163,7 @@ async def vuln_ssrf(
     runner = get_runner()
     metrics = get_metrics()
 
-    # First, get a baseline response for comparison
-    baseline_cmd = f'curl -s -D - "{target}?{parameter}=https://example.com" 2>/dev/null'
+    baseline_cmd = f'curl -s -D - {shell_quote(f"{target}?{parameter}=https://example.com")} 2>/dev/null'
     baseline_result = await runner.run(baseline_cmd, "vuln_ssrf_baseline", target, Phase.VULN_ANALYSIS, timeout=15)
     baseline = HttpResponse(status=200, body=baseline_result.raw_output)
 
@@ -176,8 +181,7 @@ async def vuln_ssrf(
     best_chain = EvidenceChain(baseline=baseline.to_dict())
 
     for internal_url, description in internal_targets:
-        # Get full response including body for content analysis
-        cmd = f'curl -s -D - "{target}?{parameter}={internal_url}" 2>/dev/null'
+        cmd = f'curl -s -D - {shell_quote(f"{target}?{parameter}={internal_url}")} 2>/dev/null'
         result = await runner.run(cmd, "vuln_ssrf", target, Phase.VULN_ANALYSIS, timeout=15)
 
         # Extract status code from headers
@@ -198,9 +202,8 @@ async def vuln_ssrf(
         if chain.total_weight > best_chain.total_weight:
             best_chain = chain
 
-    # OOB callback test if URL provided
     if callback_url:
-        cmd = f'curl -s "{target}?{parameter}={callback_url}" 2>/dev/null'
+        cmd = f'curl -s {shell_quote(f"{target}?{parameter}={callback_url}")} 2>/dev/null'
         await runner.run(cmd, "vuln_ssrf_oob", target, Phase.VULN_ANALYSIS, timeout=15)
         best_chain = best_chain.add(
             signal=f"OOB callback sent to {callback_url} — check collaborator for interaction",
@@ -238,14 +241,13 @@ async def vuln_jwt(
     runner = get_runner()
     metrics = get_metrics()
 
-    # Analyze token structure
-    cmd = f"jwt_tool '{token}' 2>/dev/null"
+    qt = shell_quote(token)
+    cmd = f"jwt_tool {qt} 2>/dev/null"
     result = await runner.run(cmd, "vuln_jwt_analyze", target, Phase.VULN_ANALYSIS, timeout=30)
 
-    # Try weak secrets with wordlist, then common passwords
     cmd2 = (
-        f"jwt_tool '{token}' -C -d /wordlists/jwt-secrets.txt 2>/dev/null || "
-        f"jwt_tool '{token}' -C -p 'secret' -p 'password' -p '123456' "
+        f"jwt_tool {qt} -C -d /wordlists/jwt-secrets.txt 2>/dev/null || "
+        f"jwt_tool {qt} -C -p 'secret' -p 'password' -p '123456' "
         f"-p 'admin' -p 'key' -p 'jwt_secret' 2>/dev/null"
     )
     result2 = await runner.run(cmd2, "vuln_jwt_crack", target, Phase.VULN_ANALYSIS, timeout=60)
@@ -296,9 +298,9 @@ async def vuln_cors(target: str) -> dict:
     best_chain = EvidenceChain()
     results_list = []
 
+    qu = shell_quote(url)
     for origin, description in origins_to_test:
-        # Get full headers to analyze ACAO + ACAC together
-        cmd = f'curl -s -I -H "Origin: {origin}" {url} 2>/dev/null'
+        cmd = f'curl -s -I -H "Origin: "{shell_quote(origin)} {qu} 2>/dev/null'
         result = await runner.run(cmd, "vuln_cors", target, Phase.VULN_ANALYSIS, timeout=15)
 
         chain = validate_cors(origin, result.raw_output, domain)
@@ -348,10 +350,10 @@ async def vuln_idor(
 
     start, end = id_range
 
-    # Step 1: Get baseline — what does an invalid/non-existent ID return?
+    qt = shell_quote(token)
     baseline_cmd = (
-        f'curl -s -D - -H "Authorization: Bearer {token}" '
-        f'"{target}/999999999" 2>/dev/null'
+        f'curl -s -D - -H "Authorization: Bearer "{qt} '
+        f'{shell_quote(f"{target}/999999999")} 2>/dev/null'
     )
     baseline_result = await runner.run(baseline_cmd, "vuln_idor_baseline", target, Phase.VULN_ANALYSIS, timeout=15)
 
@@ -363,12 +365,11 @@ async def vuln_idor(
     baseline_body = parts[1] if len(parts) > 1 else baseline_result.raw_output
     baseline = HttpResponse(status=baseline_status, body=baseline_body)
 
-    # Step 2: Test each ID and capture full responses
     test_responses: list[tuple[str, HttpResponse]] = []
-    for i in range(start, min(end + 1, start + 20)):  # cap at 20 to be respectful
+    for i in range(start, min(end + 1, start + 20)):
         cmd = (
-            f'curl -s -D - -H "Authorization: Bearer {token}" '
-            f'"{target}/{i}" 2>/dev/null'
+            f'curl -s -D - -H "Authorization: Bearer "{qt} '
+            f'{shell_quote(f"{target}/{i}")} 2>/dev/null'
         )
         result = await runner.run(cmd, "vuln_idor", target, Phase.VULN_ANALYSIS, timeout=10)
 
@@ -441,8 +442,7 @@ async def vuln_ssti(
         }
         payloads = engine_map.get(engine, payloads)
 
-    # Get baseline first
-    cmd_baseline = f'curl -s -m 15 "{url}" 2>/dev/null'
+    cmd_baseline = f'curl -s -m 15 {shell_quote(url)} 2>/dev/null'
     baseline_result = await runner.run(cmd_baseline, "vuln_ssti_baseline", target, Phase.VULN_ANALYSIS, timeout=20)
     baseline_body = baseline_result.raw_output
 
@@ -454,7 +454,7 @@ async def vuln_ssti(
         import urllib.parse
         encoded = urllib.parse.quote(payload)
         test_url = f"{url}{'&' if '?' in url else '?'}{parameter}={encoded}" if parameter else f"{url}?q={encoded}"
-        cmd = f'curl -s -m 15 "{test_url}" 2>/dev/null'
+        cmd = f'curl -s -m 15 {shell_quote(test_url)} 2>/dev/null'
         result = await runner.run(cmd, "vuln_ssti", target, Phase.VULN_ANALYSIS, timeout=20)
 
         ssti_chain = validate_ssti(
@@ -513,8 +513,9 @@ async def vuln_nuclei_scan(
     metrics = get_metrics()
 
     url = target if target.startswith("http") else f"https://{target}"
-    template_flags = " ".join(f"-t {t}/" for t in templates.split(","))
-    cmd = f"nuclei -u {url} {template_flags} -severity {severity} -json 2>/dev/null"
+    severity = validate_severity(severity)
+    template_flags = " ".join(f"-t {shell_quote(t)}/" for t in templates.split(","))
+    cmd = f"nuclei -u {shell_quote(url)} {template_flags} -severity {severity} -json 2>/dev/null"
 
     result = await runner.run(cmd, "vuln_nuclei_scan", target, Phase.VULN_ANALYSIS, timeout=300)
 
@@ -559,8 +560,8 @@ async def vuln_subdomain_takeover(target: str) -> dict:
     runner = get_runner()
     metrics = get_metrics()
 
-    # Step 1: Check CNAME
-    cmd = f"dig +short CNAME {target} 2>/dev/null"
+    qt = shell_quote(target)
+    cmd = f"dig +short CNAME {qt} 2>/dev/null"
     result = await runner.run(cmd, "vuln_subdomain_takeover", target, Phase.VULN_ANALYSIS, timeout=15)
     cname = result.raw_output.strip().rstrip(".")
 
@@ -568,13 +569,11 @@ async def vuln_subdomain_takeover(target: str) -> dict:
     response_body = ""
 
     if cname:
-        # Step 2: Check if CNAME target resolves
-        cmd2 = f"dig +short {cname} 2>/dev/null"
+        cmd2 = f"dig +short {shell_quote(cname)} 2>/dev/null"
         result2 = await runner.run(cmd2, "vuln_subdomain_takeover_resolve", target, Phase.VULN_ANALYSIS, timeout=15)
         cname_resolves = bool(result2.raw_output.strip())
 
-        # Step 3: Fetch the page to check for service fingerprints
-        cmd3 = f'curl -s -L -k "https://{target}" 2>/dev/null || curl -s -L -k "http://{target}" 2>/dev/null'
+        cmd3 = f'curl -s -L -k {shell_quote(f"https://{target}")} 2>/dev/null || curl -s -L -k {shell_quote(f"http://{target}")} 2>/dev/null'
         result3 = await runner.run(cmd3, "vuln_subdomain_takeover_http", target, Phase.VULN_ANALYSIS, timeout=15)
         response_body = result3.raw_output
 

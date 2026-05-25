@@ -9,6 +9,7 @@ from kambo.metrics import get_metrics
 from kambo.models import Phase, ToolResult
 from kambo.parsers import parse_subfinder
 from kambo.parsers.generic_parser import extract_domains, parse_json_output, parse_lines
+from kambo.sanitize import shell_quote, validate_port_spec
 from kambo.scope import validate_scope
 
 
@@ -36,7 +37,7 @@ async def recon_subdomains(
     source_durations: dict[str, float] = {}
 
     for method in methods:
-        cmd = _build_subdomain_command(target, method)
+        cmd = _build_subdomain_command(shell_quote(target), method)
         result = await runner.run(cmd, f"recon_subdomains_{method}", target, Phase.RECON)
         source_durations[method] = result.duration_seconds
 
@@ -51,7 +52,7 @@ async def recon_subdomains(
     wildcard_detected = False
     wildcard_ip = ""
     random_sub = f"kambo-wildcard-test-{id(target) % 99999}.{target}"
-    wc_cmd = f"dig +short {random_sub} 2>/dev/null"
+    wc_cmd = f"dig +short {shell_quote(random_sub)} 2>/dev/null"
     wc_result = await runner.run(wc_cmd, "recon_wildcard_check", target, Phase.RECON, timeout=10)
     if wc_result.raw_output.strip():
         wildcard_detected = True
@@ -103,13 +104,15 @@ async def recon_dns(
     metrics = get_metrics()
     results: dict = {"target": target, "records": {}, "axfr": None, "brute": []}
 
+    qt = shell_quote(target)
+
     if "records" in checks:
-        cmd = f"dnsrecon -d {target} -t std 2>/dev/null"
+        cmd = f"dnsrecon -d {qt} -t std 2>/dev/null"
         result = await runner.run(cmd, "recon_dns_records", target, Phase.RECON)
         results["records"] = {"raw": result.raw_output}
 
     if "axfr" in checks:
-        cmd = f"dnsrecon -d {target} -t axfr 2>/dev/null"
+        cmd = f"dnsrecon -d {qt} -t axfr 2>/dev/null"
         result = await runner.run(cmd, "recon_dns_axfr", target, Phase.RECON)
         axfr_success = "successful" in result.raw_output.lower()
         results["axfr"] = {
@@ -119,7 +122,7 @@ async def recon_dns(
         }
 
     if "brute" in checks:
-        cmd = f"dnsenum --noreverse -f /wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt {target} 2>/dev/null | head -200"
+        cmd = f"dnsenum --noreverse -f /wordlists/seclists/Discovery/DNS/subdomains-top1million-5000.txt {qt} 2>/dev/null | head -200"
         result = await runner.run(cmd, "recon_dns_brute", target, Phase.RECON)
         brute_domains = extract_domains(result.raw_output)
         results["brute"] = brute_domains
@@ -144,7 +147,8 @@ async def recon_ports_fast(
     runner = get_runner()
     metrics = get_metrics()
 
-    cmd = f"nmap -sS -T4 -p {ports} --open -oG - {target} 2>/dev/null"
+    ports = validate_port_spec(ports)
+    cmd = f"nmap -sS -T4 -p {ports} --open -oG - {shell_quote(target)} 2>/dev/null"
     result = await runner.run(cmd, "recon_ports_fast", target, Phase.RECON)
 
     open_ports: list[dict] = []
@@ -181,7 +185,7 @@ async def recon_tech_stack(target: str) -> dict:
     metrics = get_metrics()
 
     url = target if target.startswith("http") else f"https://{target}"
-    cmd = f"whatweb -a 3 --color=never {url} 2>/dev/null"
+    cmd = f"whatweb -a 3 --color=never {shell_quote(url)} 2>/dev/null"
     result = await runner.run(cmd, "recon_tech_stack", target, Phase.RECON)
 
     # Extract technology names from whatweb output
@@ -212,7 +216,7 @@ async def recon_waf(target: str) -> dict:
     metrics = get_metrics()
 
     url = target if target.startswith("http") else f"https://{target}"
-    cmd = f"wafw00f {url} 2>/dev/null"
+    cmd = f"wafw00f {shell_quote(url)} 2>/dev/null"
     result = await runner.run(cmd, "recon_waf", target, Phase.RECON)
 
     detected = "is behind" in result.raw_output
@@ -244,7 +248,7 @@ async def recon_certs(target: str) -> dict:
     runner = get_runner()
     metrics = get_metrics()
 
-    cmd = f'curl -s "https://crt.sh/?q=%25.{target}&output=json" 2>/dev/null | jq -r ".[].name_value" 2>/dev/null | sort -u'
+    cmd = f'curl -s "https://crt.sh/?q=%25."{shell_quote(target)}"&output=json" 2>/dev/null | jq -r ".[].name_value" 2>/dev/null | sort -u'
     result = await runner.run(cmd, "recon_certs", target, Phase.RECON, timeout=60)
 
     domains = [d.strip() for d in result.raw_output.splitlines() if d.strip() and "." in d]
@@ -270,7 +274,7 @@ async def recon_asn(target: str) -> dict:
     runner = get_runner()
     metrics = get_metrics()
 
-    cmd = f'curl -s "https://api.bgpview.io/search?query_term={target}" 2>/dev/null | jq ".data" 2>/dev/null'
+    cmd = f'curl -s "https://api.bgpview.io/search?query_term="{shell_quote(target)} 2>/dev/null | jq ".data" 2>/dev/null'
     result = await runner.run(cmd, "recon_asn", target, Phase.RECON, timeout=30)
 
     parsed = parse_json_output(result.raw_output)
@@ -284,12 +288,19 @@ async def recon_asn(target: str) -> dict:
     }
 
 
-def _build_subdomain_command(target: str, method: str) -> str:
-    """Build shell command for a specific subdomain enumeration method."""
+def _build_subdomain_command(quoted_target: str, method: str) -> str:
+    """Build shell command for a specific subdomain enumeration method.
+
+    Args:
+        quoted_target: Already shlex-quoted target string.
+        method: Enumeration method name (validated against whitelist).
+    """
     commands = {
-        "subfinder": f"subfinder -d {target} -silent 2>/dev/null",
-        "amass": f"amass enum -passive -d {target} 2>/dev/null",
-        "crtsh": f'curl -s "https://crt.sh/?q=%25.{target}&output=json" 2>/dev/null | jq -r ".[].name_value" 2>/dev/null | sort -u',
-        "dnsenum": f"dnsenum --noreverse {target} 2>/dev/null | grep -oP '[\\w.-]+\\.{target}' | sort -u",
+        "subfinder": f"subfinder -d {quoted_target} -silent 2>/dev/null",
+        "amass": f"amass enum -passive -d {quoted_target} 2>/dev/null",
+        "crtsh": f'curl -s "https://crt.sh/?q=%25."{quoted_target}"&output=json" 2>/dev/null | jq -r ".[].name_value" 2>/dev/null | sort -u',
+        "dnsenum": f"dnsenum --noreverse {quoted_target} 2>/dev/null | sort -u",
     }
-    return commands.get(method, f"echo 'Unknown method: {method}'")
+    if method not in commands:
+        return "echo 'Unknown method'"
+    return commands[method]

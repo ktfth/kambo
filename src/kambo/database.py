@@ -107,9 +107,13 @@ class Database:
         for sql in migrations:
             await self._db.execute(sql)
 
+    _ALLOWED_TABLES = frozenset({"findings", "tool_results"})
+
     async def _get_columns(self, table: str) -> set[str]:
         """Get column names for a table."""
         assert self._db is not None
+        if table not in self._ALLOWED_TABLES:
+            raise ValueError(f"Unknown table: {table}")
         async with self._db.execute(f"PRAGMA table_info({table})") as cursor:
             rows = await cursor.fetchall()
             return {row[1] for row in rows}

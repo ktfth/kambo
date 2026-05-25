@@ -69,9 +69,14 @@ class ScopeManager:
 
     def _matches(self, target: str, pattern: str) -> bool:
         """Check if target matches a scope pattern (domain, CIDR, wildcard)."""
-        # Extract domain from URL before any other checks
-        domain_match = re.search(r"https?://([^/:]+)", target)
-        effective_target = domain_match.group(1) if domain_match else target
+        from urllib.parse import urlparse
+
+        effective_target = target
+        if "://" in target:
+            parsed = urlparse(target)
+            if parsed.username or "@" in (parsed.netloc or ""):
+                raise ScopeViolationError(target, "URL contains userinfo (@) — rejected to prevent scope bypass")
+            effective_target = parsed.hostname or target
 
         # Wildcard domain: *.example.com
         if pattern.startswith("*."):

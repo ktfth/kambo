@@ -6,6 +6,7 @@ from kambo.docker_runner import get_runner
 from kambo.models import Phase
 from kambo.parsers import parse_ffuf, parse_nmap
 from kambo.parsers.generic_parser import parse_json_output
+from kambo.sanitize import shell_quote, validate_port_spec, validate_severity, validate_timing
 from kambo.scope import validate_scope
 
 
@@ -26,9 +27,12 @@ async def scan_ports_full(
     validate_scope(target)
     runner = get_runner()
 
-    cmd = f"nmap -sS -T{timing} -p {ports} --open -oX - {target} 2>/dev/null"
+    timing = validate_timing(timing)
+    ports = validate_port_spec(ports)
+    qt = shell_quote(target)
+    cmd = f"nmap -sS -T{timing} -p {ports} --open -oX - {qt} 2>/dev/null"
     if evasion:
-        cmd = f"nmap -sS -T{min(timing, 2)} -p {ports} --open -f -D RND:5 --data-length 24 -oX - {target} 2>/dev/null"
+        cmd = f"nmap -sS -T{min(timing, 2)} -p {ports} --open -f -D RND:5 --data-length 24 -oX - {qt} 2>/dev/null"
 
     result = await runner.run(cmd, "scan_ports_full", target, Phase.SCANNING, timeout=600)
     parsed = parse_nmap(result.raw_output)
@@ -54,8 +58,8 @@ async def scan_services(
     validate_scope(target)
     runner = get_runner()
 
-    port_flag = f"-p {ports}" if ports else ""
-    cmd = f"nmap -sV -sC {port_flag} --open -oX - {target} 2>/dev/null"
+    port_flag = f"-p {validate_port_spec(ports)}" if ports else ""
+    cmd = f"nmap -sV -sC {port_flag} --open -oX - {shell_quote(target)} 2>/dev/null"
     result = await runner.run(cmd, "scan_services", target, Phase.SCANNING, timeout=300)
     parsed = parse_nmap(result.raw_output)
 
@@ -75,7 +79,9 @@ async def scan_udp(
     validate_scope(target)
     runner = get_runner()
 
-    cmd = f"nmap -sU --top-ports {top_ports} --open -oX - {target} 2>/dev/null"
+    if not isinstance(top_ports, int) or top_ports < 1 or top_ports > 65535:
+        raise ValueError(f"Invalid top_ports: {top_ports}")
+    cmd = f"nmap -sU --top-ports {top_ports} --open -oX - {shell_quote(target)} 2>/dev/null"
     result = await runner.run(cmd, "scan_udp", target, Phase.SCANNING, timeout=300)
     parsed = parse_nmap(result.raw_output)
 
@@ -100,8 +106,8 @@ async def scan_directories(
     runner = get_runner()
 
     url = target if target.startswith("http") else f"https://{target}"
-    ext_flag = f"-e {extensions}" if extensions else ""
-    cmd = f"ffuf -u {url}/FUZZ -w {wordlist} -mc {match_codes} {ext_flag} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
+    ext_flag = f"-e {shell_quote(extensions)}" if extensions else ""
+    cmd = f"ffuf -u {shell_quote(url)}/FUZZ -w {shell_quote(wordlist)} -mc {shell_quote(match_codes)} {ext_flag} -o /tmp/ffuf_out.json -of json -s 2>/dev/null && cat /tmp/ffuf_out.json"
 
     result = await runner.run(cmd, "scan_directories", target, Phase.SCANNING, timeout=120)
     parsed = parse_ffuf(result.raw_output)
@@ -125,8 +131,12 @@ async def scan_vhosts(
     runner = get_runner()
 
     url = target if target.startswith("http") else f"https://{target}"
+    if filter_size is not None and (not isinstance(filter_size, int) or filter_size < 0):
+        raise ValueError(f"Invalid filter_size: {filter_size}")
     fs_flag = f"-fs {filter_size}" if filter_size else ""
-    cmd = f'ffuf -u {url} -H "Host: FUZZ.{target}" -w {wordlist} -mc 200,301,302 {fs_flag} -o /tmp/vhost_out.json -of json -s 2>/dev/null && cat /tmp/vhost_out.json'
+    qu = shell_quote(url)
+    qt = shell_quote(target)
+    cmd = f'ffuf -u {qu} -H "Host: FUZZ."{qt} -w {shell_quote(wordlist)} -mc 200,301,302 {fs_flag} -o /tmp/vhost_out.json -of json -s 2>/dev/null && cat /tmp/vhost_out.json'
 
     result = await runner.run(cmd, "scan_vhosts", target, Phase.SCANNING, timeout=120)
     parsed = parse_ffuf(result.raw_output)
@@ -146,7 +156,7 @@ async def scan_parameters(
     runner = get_runner()
 
     url = target if target.startswith("http") else f"https://{target}"
-    cmd = f"arjun -u {url} --stable 2>/dev/null"
+    cmd = f"arjun -u {shell_quote(url)} --stable 2>/dev/null"
     result = await runner.run(cmd, "scan_parameters", target, Phase.SCANNING, timeout=120)
 
     return {
@@ -177,9 +187,9 @@ async def scan_api_endpoints(
         "/swagger/v1/swagger.json", "/v1/swagger.json", "/v2/swagger.json",
     ]
 
-    # Check common spec paths
-    checks = " ".join(f'"{url}{p}"' for p in swagger_paths)
-    cmd = f"for u in {checks}; do code=$(curl -s -o /dev/null -w '%{{http_code}}' $u 2>/dev/null); echo \"$code $u\"; done"
+    qu = shell_quote(url)
+    checks = " ".join(shell_quote(f"{url}{p}") for p in swagger_paths)
+    cmd = f"for u in {checks}; do code=$(curl -s -o /dev/null -w '%{{http_code}}' \"$u\" 2>/dev/null); echo \"$code $u\"; done"
     result = await runner.run(cmd, "scan_api_endpoints_spec", target, Phase.SCANNING, timeout=60)
 
     found_specs = []
@@ -187,8 +197,7 @@ async def scan_api_endpoints(
         if line.startswith("200 "):
             found_specs.append(line.split(" ", 1)[1])
 
-    # Fuzz API paths
-    cmd2 = f"ffuf -u {url}/FUZZ -w {wordlist} -mc 200,201,204,301,302,401,403,405 -o /tmp/api_out.json -of json -s 2>/dev/null && cat /tmp/api_out.json"
+    cmd2 = f"ffuf -u {qu}/FUZZ -w {shell_quote(wordlist)} -mc 200,201,204,301,302,401,403,405 -o /tmp/api_out.json -of json -s 2>/dev/null && cat /tmp/api_out.json"
     result2 = await runner.run(cmd2, "scan_api_endpoints_fuzz", target, Phase.SCANNING, timeout=120)
     parsed = parse_ffuf(result2.raw_output)
 
@@ -217,8 +226,9 @@ async def scan_vulns(
     runner = get_runner()
 
     url = target if target.startswith("http") else f"https://{target}"
-    template_flag = " ".join(f"-t {t}" for t in templates) if templates else ""
-    cmd = f"nuclei -u {url} -severity {severity} {template_flag} -json 2>/dev/null"
+    severity = validate_severity(severity)
+    template_flag = " ".join(f"-t {shell_quote(t)}" for t in templates) if templates else ""
+    cmd = f"nuclei -u {shell_quote(url)} -severity {severity} {template_flag} -json 2>/dev/null"
     result = await runner.run(cmd, "scan_vulns", target, Phase.SCANNING, timeout=300)
 
     from kambo.parsers import parse_nuclei
@@ -239,7 +249,7 @@ async def scan_cms(
     runner = get_runner()
 
     url = target if target.startswith("http") else f"https://{target}"
-    cmd = f"wpscan --url {url} --enumerate p,t,u --no-banner --format json 2>/dev/null"
+    cmd = f"wpscan --url {shell_quote(url)} --enumerate p,t,u --no-banner --format json 2>/dev/null"
     result = await runner.run(cmd, "scan_cms", target, Phase.SCANNING, timeout=180)
     parsed = parse_json_output(result.raw_output)
 
@@ -263,7 +273,7 @@ async def scan_tls(target: str) -> dict:
     if ":" not in host:
         host = f"{host}:443"
 
-    cmd = f"testssl.sh --quiet --color 0 {host} 2>/dev/null | head -100"
+    cmd = f"testssl.sh --quiet --color 0 {shell_quote(host)} 2>/dev/null | head -100"
     result = await runner.run(cmd, "scan_tls", target, Phase.SCANNING, timeout=120)
 
     return {

