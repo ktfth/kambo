@@ -1,0 +1,79 @@
+name: 📣 Kambo — Post Diário às 18h
+
+on:
+  schedule:
+    # 18h00 Horário de Brasília (BRT = UTC-3) → 21h00 UTC
+    - cron: '0 21 * * *'
+
+  # Permite disparar manualmente pela aba Actions no GitHub
+  workflow_dispatch:
+    inputs:
+      day:
+        description: 'Dia específico (1-30). Deixe vazio para usar o dia do ciclo automático.'
+        required: false
+        type: string
+      dry_run:
+        description: 'Dry run — mostra o post mas NÃO publica'
+        type: boolean
+        default: false
+
+jobs:
+  post:
+    name: Publicar post do dia no Threads
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Código ──────────────────────────────────────────────────────────
+      - name: Checkout do repositório
+        uses: actions/checkout@v4
+
+      # ── 2. Python ─────────────────────────────────────────────────────────
+      - name: Configurar Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+
+      - name: Instalar dependências
+        run: pip install httpx python-dotenv
+
+      # ── 3. Publicar ────────────────────────────────────────────────────────
+      - name: Publicar no Threads
+        env:
+          POSTER_MODE: api
+          THREADS_USER_ID:       ${{ secrets.THREADS_USER_ID }}
+          THREADS_ACCESS_TOKEN:  ${{ secrets.THREADS_ACCESS_TOKEN }}
+          # Data de início do ciclo de 30 dias (configure em Settings → Variables)
+          KAMBO_START_DATE:      ${{ vars.KAMBO_START_DATE }}
+        run: |
+          cd social-media
+
+          # Determina qual post usar
+          if [ -n "${{ inputs.day }}" ]; then
+            CMD="day ${{ inputs.day }}"
+          else
+            CMD="today"
+          fi
+
+          # Dry run opcional (disparo manual)
+          if [ "${{ inputs.dry_run }}" = "true" ]; then
+            CMD="$CMD --dry-run"
+          fi
+
+          echo "▶ Executando: python poster.py $CMD"
+          python poster.py $CMD
+
+      # ── 4. Sumário ─────────────────────────────────────────────────────────
+      - name: Sumário da publicação
+        if: always()
+        run: |
+          echo "## 📣 Kambo Social Poster" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          if [ -f social-media/post-log.jsonl ]; then
+            echo "**Última entrada do log:**" >> $GITHUB_STEP_SUMMARY
+            echo '```json' >> $GITHUB_STEP_SUMMARY
+            tail -1 social-media/post-log.jsonl >> $GITHUB_STEP_SUMMARY
+            echo '```' >> $GITHUB_STEP_SUMMARY
+          else
+            echo "_Nenhum log encontrado (dry-run ou erro antes do log)_" >> $GITHUB_STEP_SUMMARY
+          fi
