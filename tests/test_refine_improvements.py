@@ -333,47 +333,169 @@ class TestRaceCondition:
 
 
 # ---------------------------------------------------------------------------
-# Fix 6: scan_directories — rate_limiter import check
+# Fix 6: scan_directories — integration tests with monkeypatched fakes
 # ---------------------------------------------------------------------------
 
+from types import SimpleNamespace
+
+
+def _make_tool_result(raw_output: str) -> SimpleNamespace:
+    """Create a minimal ToolResult-compatible stub."""
+    return SimpleNamespace(raw_output=raw_output, exit_code=0)
+
+
+def _fake_runner(probe_raw: str = "HTTP/1.1 200 OK", scan_raw: str = "") -> object:
+    """Return a runner stub: first run() call = probe, subsequent = scan."""
+
+    class _Runner:
+        def __init__(self) -> None:
+            self.commands: list[str] = []
+            self._call = 0
+
+        async def run(self, cmd: str, *args, **kwargs) -> SimpleNamespace:
+            self.commands.append(cmd)
+            self._call += 1
+            if self._call == 1:
+                return _make_tool_result(probe_raw)
+            return _make_tool_result(scan_raw or '{"results":[],"commandline":""}')
+
+    return _Runner()
+
+
+def _fake_limiter(probe_analysis: dict) -> object:
+    """Return a rate-limiter stub whose record_request returns probe_analysis."""
+
+    class _Limiter:
+        def record_request(self, target: str, **kwargs: object) -> dict:
+            return probe_analysis
+
+    return _Limiter()
+
+
 class TestScanDirectoriesRateLimiterIntegration:
-    """Verify rate_limiter is imported and used in scan_directories."""
+    """Integration tests: scan_directories WAF detection + adaptive rate limiting."""
+
+    # --- source-level checks (kept for fast regression) ---
 
     def test_rate_limiter_imported_in_scanning_module(self) -> None:
-        import kambo.tools.scanning as scanning_module
-        import kambo.rate_limiter as rl_module
-        # The module should reference the rate limiter
         import inspect
+        import kambo.tools.scanning as scanning_module
+
         source = inspect.getsource(scanning_module)
-        assert "get_rate_limiter" in source, "get_rate_limiter not used in scanning.py"
+        assert "get_rate_limiter" in source, "get_rate_limiter not called in scanning.py"
         assert "rate_limiter" in source.lower(), "rate_limiter not imported in scanning.py"
 
-    def test_rate_limiter_singleton_accessible(self) -> None:
-        from kambo.rate_limiter import get_rate_limiter
-        limiter = get_rate_limiter()
-        assert limiter is not None
-        # Singleton: same instance
-        assert get_rate_limiter() is limiter
+    # --- WAF-detected scenario ---
 
-    def test_rate_limiter_detect_waf_cloudflare(self) -> None:
-        from kambo.rate_limiter import detect_waf
-        response = "cloudflare protection cf-ray: 123"
-        result = detect_waf(response)
-        assert result is not None and "cloudflare" in result.lower()
+    async def test_waf_detected_reduces_threads_to_2(self, monkeypatch) -> None:
+        import kambo.tools.scanning as sm
 
-    def test_rate_limiter_detect_waf_no_waf(self) -> None:
-        from kambo.rate_limiter import detect_waf
-        result = detect_waf("HTTP/1.1 200 OK\nContent-Type: text/html\n\nHello world")
-        assert result is None
+        runner = _fake_runner()
+        analysis = {
+            "waf_detected": "Cloudflare",
+            "is_blocked": False,
+            "evasion_tips": [{"technique": "ip_rotation", "description": "rotate IPs"}],
+            "recommended_delay_seconds": 0.5,
+        }
+        monkeypatch.setattr(sm, "get_runner", lambda: runner)
+        monkeypatch.setattr(sm, "get_rate_limiter", lambda: _fake_limiter(analysis))
+        monkeypatch.setattr(sm, "validate_scope", lambda t: None)
 
-    def test_rate_limiter_record_request_returns_dict(self) -> None:
-        from kambo.rate_limiter import get_rate_limiter
-        limiter = get_rate_limiter()
-        analysis = limiter.record_request(
-            target="https://example.com",
-            response_body="Hello world",
-            status_code=200,
-        )
-        assert "waf_detected" in analysis
-        assert "is_blocked" in analysis
-        assert "recommended_delay_seconds" in analysis
+        result = await sm.scan_directories("https://example.com")
+
+        # ffuf command should contain -t 2 and -p 0.5
+        ffuf_cmd = runner.commands[1]  # second call is the real scan
+        assert "-t 2" in ffuf_cmd, f"Expected '-t 2' in ffuf cmd, got: {ffuf_cmd}"
+        assert "-p 0.5" in ffuf_cmd, f"Expected '-p 0.5' in ffuf cmd, got: {ffuf_cmd}"
+
+        # result metadata
+        assert result["waf_detected"] is True
+        assert result["waf_name"] == "Cloudflare"
+        assert result["rate_adapted"] is True
+        assert len(result["evasion_tips"]) > 0
+
+    # --- blocked (no named WAF) scenario ---
+
+    async def test_blocked_without_waf_reduces_threads_to_3(self, monkeypatch) -> None:
+        import kambo.tools.scanning as sm
+
+        runner = _fake_runner()
+        analysis = {
+            "waf_detected": None,
+            "is_blocked": True,
+            "evasion_tips": [],
+            "recommended_delay_seconds": 0.2,
+        }
+        monkeypatch.setattr(sm, "get_runner", lambda: runner)
+        monkeypatch.setattr(sm, "get_rate_limiter", lambda: _fake_limiter(analysis))
+        monkeypatch.setattr(sm, "validate_scope", lambda t: None)
+
+        result = await sm.scan_directories("https://example.com")
+
+        ffuf_cmd = runner.commands[1]
+        assert "-t 3" in ffuf_cmd, f"Expected '-t 3' in blocked cmd, got: {ffuf_cmd}"
+        assert "-p 0.2" in ffuf_cmd, f"Expected '-p 0.2' in blocked cmd, got: {ffuf_cmd}"
+
+        assert result["waf_detected"] is False
+        assert result["waf_name"] == ""
+        assert result["rate_adapted"] is True
+
+    # --- clean (no WAF, no block) scenario ---
+
+    async def test_no_waf_uses_full_threads(self, monkeypatch) -> None:
+        import kambo.tools.scanning as sm
+
+        runner = _fake_runner()
+        analysis = {
+            "waf_detected": None,
+            "is_blocked": False,
+            "evasion_tips": [],
+            "recommended_delay_seconds": 0.1,
+        }
+        monkeypatch.setattr(sm, "get_runner", lambda: runner)
+        monkeypatch.setattr(sm, "get_rate_limiter", lambda: _fake_limiter(analysis))
+        monkeypatch.setattr(sm, "validate_scope", lambda t: None)
+
+        result = await sm.scan_directories("https://example.com")
+
+        ffuf_cmd = runner.commands[1]
+        assert "-t 10" in ffuf_cmd, f"Expected '-t 10' (full threads), got: {ffuf_cmd}"
+        # No delay flag expected in the clean path
+        assert "-p " not in ffuf_cmd, f"Unexpected delay flag in clean cmd: {ffuf_cmd}"
+
+        assert result["waf_detected"] is False
+        assert result["rate_adapted"] is False
+        assert result["evasion_tips"] == []
+
+    # --- result dict structure ---
+
+    async def test_result_always_contains_waf_metadata_keys(self, monkeypatch) -> None:
+        import kambo.tools.scanning as sm
+
+        runner = _fake_runner()
+        analysis = {"waf_detected": None, "is_blocked": False, "evasion_tips": []}
+        monkeypatch.setattr(sm, "get_runner", lambda: runner)
+        monkeypatch.setattr(sm, "get_rate_limiter", lambda: _fake_limiter(analysis))
+        monkeypatch.setattr(sm, "validate_scope", lambda t: None)
+
+        result = await sm.scan_directories("https://example.com")
+
+        for key in ("waf_detected", "waf_name", "rate_adapted", "evasion_tips"):
+            assert key in result, f"Missing key in result: {key}"
+
+    # --- probe fires before the ffuf scan ---
+
+    async def test_probe_runs_before_ffuf(self, monkeypatch) -> None:
+        import kambo.tools.scanning as sm
+
+        runner = _fake_runner(probe_raw="HTTP/1.1 200 OK cf-ray: abc")
+        analysis = {"waf_detected": None, "is_blocked": False, "evasion_tips": []}
+        monkeypatch.setattr(sm, "get_runner", lambda: runner)
+        monkeypatch.setattr(sm, "get_rate_limiter", lambda: _fake_limiter(analysis))
+        monkeypatch.setattr(sm, "validate_scope", lambda t: None)
+
+        await sm.scan_directories("https://example.com")
+
+        assert len(runner.commands) == 2, "Expected exactly 2 runner calls (probe + scan)"
+        assert "curl" in runner.commands[0], "First call should be the curl WAF probe"
+        assert "ffuf" in runner.commands[1], "Second call should be the ffuf scan"

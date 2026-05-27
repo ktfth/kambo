@@ -1497,8 +1497,8 @@ def validate_deserialization(
 # ---------------------------------------------------------------------------
 
 _GRAPHQL_INTROSPECTION_SIGNATURES: list[str] = [
-    r'"__schema"\s*:',                    # introspection response
-    r'"__types"\s*:',                     # type listing
+    r'"__schema"\s*:',                    # introspection response root
+    r'"types"\s*:\s*\[',                  # types array under __schema (real GQL responses)
     r'"queryType"\s*:.*"name"',           # schema root types
     r'"mutationType"\s*:',                # mutation support exposed
     r'"directives"\s*:\s*\[',             # directives listing
