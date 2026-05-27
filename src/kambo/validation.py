@@ -511,17 +511,27 @@ def validate_idor(
 
     # Different content for different IDs = real IDOR
     if len(unique_hashes) > 1 and accessible_count > 0:
+        # Build raw_data from first differing response for audit trail
+        _first_diff = next(
+            (r for _, r in test_responses if r.status == 200 and r.body_hash != baseline_response.body_hash),
+            None,
+        )
+        _diff_preview = _first_diff.body[:500] if _first_diff else ""
+
         chain = chain.add(
             signal=f"{accessible_count} resources accessible with {len(unique_hashes)} unique responses",
             source="idor_analysis",
+            raw_data=_diff_preview,
             weight=0.6,
         )
 
         # Strong signal: content differs per ID
         if len(unique_hashes) >= min(3, accessible_count):
+            _hashes_sample = ", ".join(list(unique_hashes)[:5])
             chain = chain.add(
                 signal="Response content varies per resource ID — confirms different user data returned",
                 source="idor_diffing",
+                raw_data=f"unique_hashes=[{_hashes_sample}]",
                 weight=0.8,
             )
 
@@ -1296,8 +1306,8 @@ def validate_open_redirect(
 # ---------------------------------------------------------------------------
 
 _SSTI_CONFIRMED_PATTERNS: list[str] = [
-    r"49",                          # {{7*7}} rendered
-    r"7777777",                     # {{7*'7'}} → Python/Jinja2
+    r"(?<!\d)49(?!\d)",             # {{7*7}} rendered — anchored to avoid FP on "149", "492", prices
+    r"(?<!\d)7777777(?!\d)",        # {{7*'7'}} → Python/Jinja2
     r"<class 'str'>",               # Python object exposure
     r"warning.*template.*syntax",   # Twig/Smarty error
     r"undefined.*variable.*template",  # Smarty error
@@ -1336,9 +1346,10 @@ def validate_ssti(
         return chain.add_fp_check("Empty output — no SSTI evidence")
 
     # FP check: payload reflected literally (not rendered)
+    _render_pattern = rf"(?<!\d){re.escape(expected_render)}(?!\d)" if expected_render else ""
     if payload and payload in output:
         # If the payload appears as-is AND expected_render doesn't appear, it's a reflection, not render
-        if expected_render not in output:
+        if _render_pattern and not re.search(_render_pattern, output):
             return chain.add_fp_check("Payload reflected literally — template not rendered")
 
     # FP check: template engine explicitly rejected the payload
@@ -1350,8 +1361,9 @@ def validate_ssti(
     # CRITICAL: if the expected render already exists in the baseline response,
     # it's natural page content (e.g. "49" in product IDs, prices, SVG paths),
     # NOT evidence of template rendering.
-    if expected_render and expected_render in output:
-        if baseline_body and expected_render in baseline_body:
+    # Use word-boundary regex to avoid matching "149", "492", etc.
+    if expected_render and re.search(_render_pattern, output):
+        if baseline_body and re.search(_render_pattern, baseline_body):
             chain = chain.add_fp_check(
                 f"Expected render {expected_render!r} already present in baseline"
                 " — likely natural page content, not template evaluation"
@@ -1394,7 +1406,7 @@ def validate_ssti(
 
     # Baseline comparison: if response differs and expected render present
     if baseline_body and output.strip() != baseline_body.strip():
-        if expected_render in output and expected_render not in baseline_body:
+        if re.search(_render_pattern, output) and not re.search(_render_pattern, baseline_body):
             chain = chain.add(
                 signal="Response differs from baseline and contains rendered payload",
                 source="ssti_baseline_comparison",

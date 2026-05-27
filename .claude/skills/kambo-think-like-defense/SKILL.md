@@ -274,3 +274,14 @@ defense modeling performed.
 - **Over-theorizing**: this skill informs where to look, not what you'll find. Spend 15-20 minutes on the model, then go test. Don't spend hours imagining scenarios.
 - **Ignoring strong defenses**: sometimes the defense has a flaw in implementation. "They have a WAF" doesn't mean the WAF is configured correctly.
 - **Tunnel vision on one blind spot**: map the full negative space before committing time to a single vector. The best entry point might not be the first one you notice.
+
+## Persist Learnings
+
+After completing this workflow, persist insights for future sessions:
+
+1. Save operational patterns discovered during this session
+2. Record which techniques/tools produced the best results
+3. Note target-specific behaviors that affected outcomes
+4. Feed findings into the calibration pipeline via `/kambo-calibrate`
+
+Learnings are stored at `~/.kambo/learnings.jsonl` and loaded automatically in future sessions.

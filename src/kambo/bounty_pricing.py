@@ -28,37 +28,51 @@ class ReportReadiness(str, Enum):
 
 # Historical acceptance rates by vuln type (from public bounty data).
 # These represent the probability a valid finding of this type gets accepted.
+#
+# Evidence-backed: vuln types that have a corresponding validate_*() in
+# validation.py.  The evidence chain produces confidence levels that
+# feed into the pricing formula.
+#
+# Advisory-only: vuln types WITHOUT a validator.  Pricing estimates are
+# less reliable because findings are not graded by evidence chains.
+# These are kept for bounty_estimate_value() to give ballpark numbers
+# even when no validator exists yet.
+
 _VULN_ACCEPTANCE_RATES: dict[str, float] = {
+    # --- Evidence-backed (have validate_*) ---
     # High acceptance — clear impact, easy to verify
     "sqli": 0.95,
     "rce": 0.98,
     "ssrf": 0.90,
-    "auth_bypass": 0.92,
     "idor": 0.88,
     "bola": 0.88,
     "bfla": 0.85,
     "subdomain_takeover": 0.80,
     "jwt": 0.85,
-    "credential_exposure": 0.90,
+    "ssti": 0.86,
+    "path_traversal": 0.82,
+    "xxe": 0.83,
+    "insecure_deserialization": 0.85,
+    "prototype_pollution": 0.80,
 
     # Medium acceptance — sometimes disputed or downgraded
     "xss": 0.75,
     "cors": 0.60,
     "csrf": 0.70,
-    "information_disclosure": 0.55,
     "open_redirect": 0.50,
-    "insecure_deserialization": 0.85,
+
+    # --- Advisory-only (NO validate_*, estimates less reliable) ---
+    "auth_bypass": 0.92,
+    "credential_exposure": 0.90,
     "hardcoded_credentials": 0.88,
-    "prototype_pollution": 0.80,
-    "ssti": 0.86,
-    "path_traversal": 0.82,
-    "xxe": 0.83,
+    "information_disclosure": 0.55,
+    "default_credentials": 0.65,
+    "misconfig": 0.60,
 
     # Low acceptance — often marked informational or duplicate
     "rate_limiting": 0.10,
     "missing_headers": 0.05,
     "version_disclosure": 0.15,
-    "default_credentials": 0.65,
 }
 
 # Confidence → probability the finding is real (not FP)

@@ -316,3 +316,14 @@ FOR EACH internal_url:
 - **Not verifying secrets**: a hex string in a JS file might be a CSS color, a hash, or junk. Verify before reporting.
 - **Skipping source maps**: if `.map` files exist, they override everything — analyze the original source, not the minified bundle.
 - **One-and-done**: JS files change with every deployment. Re-run JS hunt periodically or after `recon_diff` detects changes.
+
+## Persist Learnings
+
+After completing this workflow, persist insights for future sessions:
+
+1. Save operational patterns discovered during this session
+2. Record which techniques/tools produced the best results
+3. Note target-specific behaviors that affected outcomes
+4. Feed findings into the calibration pipeline via `/kambo-calibrate`
+
+Learnings are stored at `~/.kambo/learnings.jsonl` and loaded automatically in future sessions.

@@ -371,3 +371,14 @@ FOR EACH workflow_mapped:
 - **Skipping impact assessment**: "price can be changed in request" means nothing without proving the server processes the modified price.
 - **Over-testing in production**: logic bugs involving financial transactions should be tested minimally. Don't actually complete $0 purchases — show the price was accepted, then cancel.
 - **Ignoring race conditions**: many logic bugs only appear under concurrent requests. If a flow seems solid, test it with parallel requests before marking clean.
+
+## Persist Learnings
+
+After completing this workflow, persist insights for future sessions:
+
+1. Save operational patterns discovered during this session
+2. Record which techniques/tools produced the best results
+3. Note target-specific behaviors that affected outcomes
+4. Feed findings into the calibration pipeline via `/kambo-calibrate`
+
+Learnings are stored at `~/.kambo/learnings.jsonl` and loaded automatically in future sessions.

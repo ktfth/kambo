@@ -339,3 +339,14 @@ THEN: Run /kambo-confidence on the complete chain.
 - **Chaining unrelated findings**: XSS on subdomain A + IDOR on subdomain B isn't a chain unless A enables B.
 - **Ignoring individual reporting**: sometimes a HIGH finding alone is better than a forced chain. Don't devalue a good finding by wrapping it in a weak chain.
 - **Maximum exploitation**: demonstrate the minimum needed to prove maximum impact. Access 3 records to prove you could access 3 million. Don't actually dump everything.
+
+## Persist Learnings
+
+After completing this workflow, persist insights for future sessions:
+
+1. Save operational patterns discovered during this session
+2. Record which techniques/tools produced the best results
+3. Note target-specific behaviors that affected outcomes
+4. Feed findings into the calibration pipeline via `/kambo-calibrate`
+
+Learnings are stored at `~/.kambo/learnings.jsonl` and loaded automatically in future sessions.

@@ -127,3 +127,14 @@ Print the Mermaid code directly — Claude Code renders it in compatible termina
 ### In reports:
 - Embed Mermaid diagrams in bounty reports for visual evidence
 - Use `confidence_tree` to show evidence chain quality
+
+## Persist Learnings
+
+After completing this workflow, persist insights for future sessions:
+
+1. Save operational patterns discovered during this session
+2. Record which techniques/tools produced the best results
+3. Note target-specific behaviors that affected outcomes
+4. Feed findings into the calibration pipeline via `/kambo-calibrate`
+
+Learnings are stored at `~/.kambo/learnings.jsonl` and loaded automatically in future sessions.

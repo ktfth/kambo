@@ -384,11 +384,26 @@ async def report_confirm_finding(
 
     finding = matching[0]
     tools = finding.get("tools_used", [])
+
+    warning = ""
+    if not tools:
+        # Derive a synthetic tool name so feedback is not silently lost.
+        severity = finding.get("severity", "unknown")
+        fallback_tool = f"unattributed_{severity}"
+        tools = [fallback_tool]
+        warning = (
+            f"Finding {finding_id} has no tools_used — "
+            f"feedback recorded against '{fallback_tool}'"
+        )
+
     for tool in tools:
         metrics.record_user_feedback(tool, is_true_positive)
 
-    return {
+    result: dict = {
         "finding_id": finding_id,
         "feedback": "true_positive" if is_true_positive else "false_positive",
         "updated_metrics": metrics.aggregate_summary(),
     }
+    if warning:
+        result["warning"] = warning
+    return result

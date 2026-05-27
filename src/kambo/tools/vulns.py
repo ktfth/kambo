@@ -16,12 +16,20 @@ from kambo.scope import validate_scope
 from kambo.validation import (
     HttpResponse,
     validate_cors,
+    validate_csrf,
+    validate_deserialization,
     validate_idor,
     validate_jwt,
+    validate_open_redirect,
+    validate_path_traversal,
+    validate_prototype_pollution,
+    validate_rce,
     validate_sqli,
     validate_ssrf,
+    validate_ssti,
     validate_subdomain_takeover,
     validate_xss,
+    validate_xxe,
 )
 
 
@@ -418,8 +426,6 @@ async def vuln_ssti(
     validate_scope(target)
     runner = get_runner()
     metrics = get_metrics()
-
-    from kambo.validation import validate_ssti
 
     url = target if target.startswith("http") else f"https://{target}"
 

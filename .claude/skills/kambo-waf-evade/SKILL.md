@@ -419,3 +419,14 @@ FAILED ATTEMPTS:
 - **Using known bypasses without checking version**: WAF bypasses get patched. What worked 6 months ago may not work today.
 - **Spending too long on one target**: if 30 minutes of evasion produces nothing, the rules may be too tight. Pivot to an endpoint or protocol the WAF doesn't inspect.
 - **Forgetting about alternative paths**: sometimes the best WAF bypass is finding a path that doesn't go through the WAF at all (direct IP, different subdomain, WebSocket, etc.).
+
+## Persist Learnings
+
+After completing this workflow, persist insights for future sessions:
+
+1. Save operational patterns discovered during this session
+2. Record which techniques/tools produced the best results
+3. Note target-specific behaviors that affected outcomes
+4. Feed findings into the calibration pipeline via `/kambo-calibrate`
+
+Learnings are stored at `~/.kambo/learnings.jsonl` and loaded automatically in future sessions.

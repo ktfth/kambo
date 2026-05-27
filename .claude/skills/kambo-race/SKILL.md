@@ -370,3 +370,14 @@ REMEDIATION:
 - **Giving up after one attempt**: race conditions are probabilistic. Test at least 3 times with N=10+ before concluding an endpoint is safe.
 - **Not reversing impact**: if your race condition created real financial impact, document it AND try to reverse it (refund, delete duplicate, etc.).
 - **Reporting without quantifying impact**: "race condition exists" is weak. "Race condition allows unlimited coupon redemption worth $50 each, works 70% of the time" is P1.
+
+## Persist Learnings
+
+After completing this workflow, persist insights for future sessions:
+
+1. Save operational patterns discovered during this session
+2. Record which techniques/tools produced the best results
+3. Note target-specific behaviors that affected outcomes
+4. Feed findings into the calibration pipeline via `/kambo-calibrate`
+
+Learnings are stored at `~/.kambo/learnings.jsonl` and loaded automatically in future sessions.

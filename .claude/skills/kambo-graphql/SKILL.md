@@ -433,3 +433,14 @@ RECOMMENDATIONS:
 - **Ignoring mutations**: queries get the attention, but mutations (write operations) are where the real impact is. Always test mutations.
 - **Not checking subscriptions**: WebSocket-based GraphQL subscriptions often have weaker auth than HTTP queries. Don't skip them.
 - **Assuming field-level auth exists**: many GraphQL implementations do type-level auth but not field-level. Request every field you can find.
+
+## Persist Learnings
+
+After completing this workflow, persist insights for future sessions:
+
+1. Save operational patterns discovered during this session
+2. Record which techniques/tools produced the best results
+3. Note target-specific behaviors that affected outcomes
+4. Feed findings into the calibration pipeline via `/kambo-calibrate`
+
+Learnings are stored at `~/.kambo/learnings.jsonl` and loaded automatically in future sessions.

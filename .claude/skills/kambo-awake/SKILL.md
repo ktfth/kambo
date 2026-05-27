@@ -246,3 +246,14 @@ Quick reference:
 - If advanced → skip to the specific phase they need
 - If stuck → suggest the next highest-impact action
 - If first time → go slow, confirm understanding at each checkpoint
+
+## Persist Learnings
+
+After completing this workflow, persist insights for future sessions:
+
+1. Save operational patterns discovered during this session
+2. Record which techniques/tools produced the best results
+3. Note target-specific behaviors that affected outcomes
+4. Feed findings into the calibration pipeline via `/kambo-calibrate`
+
+Learnings are stored at `~/.kambo/learnings.jsonl` and loaded automatically in future sessions.
