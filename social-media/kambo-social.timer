@@ -1,0 +1,12 @@
+[Unit]
+Description=Kambo Social — dispara às 18h todo dia
+Requires=kambo-social.service
+
+[Timer]
+# Executa todo dia às 18:00 (horário local).
+# Persistent=true garante execução mesmo que o sistema estivesse desligado no horário.
+OnCalendar=*-*-* 18:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

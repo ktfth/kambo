@@ -1,0 +1,15 @@
+[Unit]
+Description=Kambo Social Media Poster — post do dia
+After=network-online.target
+
+[Service]
+Type=oneshot
+# Ajuste os caminhos abaixo para o seu ambiente.
+# Execute: which python3  e  pwd  dentro de social-media/ para obter os valores.
+ExecStart=/usr/bin/python3 /opt/kambo/social-media/poster.py today
+WorkingDirectory=/opt/kambo/social-media
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=default.target

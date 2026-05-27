@@ -13,14 +13,17 @@ social-media/
 ├── calendar-30days.md       ← Calendário de 30 dias com temas
 ├── hashtags.md              ← Banco de hashtags por plataforma
 │
-├── poster.py                ← 🆕 Poster automático cross-platform (Python)
-├── threads_client.py        ← 🆕 Cliente Threads: API oficial + Chrome/Playwright
-├── requirements-social.txt  ← 🆕 Dependências Python
-├── .env.example             ← 🆕 Template de configuração
+├── poster.py                ← Poster automático cross-platform (Python)
+├── threads_client.py        ← Cliente Threads: API oficial + Chrome/Playwright
+├── requirements-social.txt  ← Dependências Python
+├── .env.example             ← Template de configuração
 │
-├── setup-windows.ps1        ← 🆕 Setup automático para Windows
-├── windows-task.xml         ← 🆕 Task Scheduler XML (import manual)
-├── schedule.sh              ← Script bash (Linux/macOS, cron)
+├── setup-linux.sh           ← Setup automático para Linux/macOS (1 comando)
+├── setup-windows.ps1        ← Setup automático para Windows
+├── windows-task.xml         ← Task Scheduler XML (import manual)
+├── schedule.sh              ← Script bash auxiliar (Linux/macOS)
+├── kambo-social.service     ← Unidade systemd (Linux)
+├── kambo-social.timer       ← Timer systemd — 18h diário (Linux)
 │
 └── posts/
     ├── twitter/             ← Posts curtos (até 280 chars / Threads 500)
@@ -55,18 +58,16 @@ O setup vai:
 ### 🐧 Linux / 🍎 macOS
 
 ```bash
-# 1. Instale as dependências
 cd kambo/social-media
-pip install -r requirements-social.txt
-playwright install chrome
-
-# 2. Configure o .env
-cp .env.example .env
-# Edite o .env com seu editor preferido
-
-# 3. Agende às 18h (cron)
-python poster.py schedule install
+chmod +x setup-linux.sh && ./setup-linux.sh
 ```
+
+O script vai:
+- ✅ Verificar Python 3.11+ e instalar dependências
+- ✅ Instalar o driver Chrome do Playwright
+- ✅ Criar o `.env` com o caminho do perfil Chrome detectado automaticamente
+- ✅ Oferecer agendamento via **systemd timer** (recomendado) ou cron
+- ✅ Executar dry-run do post de hoje para confirmar que tudo funciona
 
 ---
 
@@ -161,6 +162,31 @@ python poster.py schedule install
 ```
 
 Para ver no GUI: Abra **Agendador de Tarefas** → Biblioteca → `KamboSocialPoster`
+
+### Linux — systemd timer (recomendado)
+
+Mais robusto que cron: retry automático, logs via `journald`, funciona mesmo após reinicialização.
+
+```bash
+# O setup-linux.sh instala automaticamente. Para instalar manualmente:
+
+# 1. Copie os arquivos de unidade
+cp kambo-social.service kambo-social.timer ~/.config/systemd/user/
+
+# 2. Edite os caminhos no .service (ExecStart e WorkingDirectory)
+nano ~/.config/systemd/user/kambo-social.service
+
+# 3. Ative o timer
+systemctl --user daemon-reload
+systemctl --user enable --now kambo-social.timer
+
+# Verificar status
+systemctl --user status kambo-social.timer
+journalctl --user -u kambo-social.service -f
+
+# Parar
+systemctl --user disable --now kambo-social.timer
+```
 
 ### Linux / macOS — cron
 ```bash
