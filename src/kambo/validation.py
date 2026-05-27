@@ -511,9 +511,15 @@ def validate_idor(
 
     # Different content for different IDs = real IDOR
     if len(unique_hashes) > 1 and accessible_count > 0:
+        # Capture the first accessible response body as raw evidence
+        first_accessible = next(
+            (resp for _, resp in test_responses if resp.status == 200), None
+        )
+        raw_evidence = first_accessible.body[:500] if first_accessible else ""
         chain = chain.add(
             signal=f"{accessible_count} resources accessible with {len(unique_hashes)} unique responses",
             source="idor_analysis",
+            raw_data=raw_evidence,
             weight=0.6,
         )
 
@@ -1434,6 +1440,17 @@ def validate_prototype_pollution(
     if re.search(r"(invalid json|json parse|unexpected token|malformed)", output, re.IGNORECASE):
         return chain.add_fp_check("Server rejected input as malformed JSON — not polluted")
 
+    # FP check: injected value echoed only inside error context (e.g. 400 validation message)
+    if injected_value and injected_value in output:
+        if re.search(r"(error|invalid|rejected|blocked|validation)", output[:500], re.IGNORECASE):
+            # Check if payload only appears inside error fields — not a real pollution
+            value_pos = output.find(injected_value)
+            surrounding = output[max(0, value_pos - 100): value_pos + 100]
+            if re.search(r"(error|message|detail|description)\s*[\"']?\s*:", surrounding, re.IGNORECASE):
+                return chain.add_fp_check(
+                    f"Injected value appears only inside error/validation message — server echoed payload, not polluted"
+                )
+
     # Primary signal: injected value appears in unexpected response field
     if injected_value and injected_value in output:
         # Check it's not just reflected in an error
@@ -1523,6 +1540,17 @@ def validate_deserialization(
     for pattern in _DESER_FP_PATTERNS:
         if re.search(pattern, output, re.IGNORECASE):
             return chain.add_fp_check(f"Deserialization explicitly rejected: {pattern}")
+
+    # FP check: generic HTTP 5xx error without deserialization-specific indicators
+    if re.search(r"(HTTP/\d\.?\d?\s+5\d{2}|internal server error|500 error)", output, re.IGNORECASE):
+        deser_specific = any(
+            re.search(pattern, output, re.IGNORECASE)
+            for pattern, _, _ in _DESER_CONFIRMED_SIGNALS
+        )
+        if not deser_specific and not expected_output:
+            return chain.add_fp_check(
+                "Generic HTTP 5xx error without deserialization-specific indicators — likely input validation rejection"
+            )
 
     # Primary signal: expected command output (RCE confirmation)
     if expected_output and expected_output in output:
