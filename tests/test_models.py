@@ -94,6 +94,89 @@ class TestEvidenceChain:
         assert len(chain.items[0].raw_data) == 2000
 
 
+class TestEvidenceChainGating:
+    """Doctrine §3 — gates that CAP the tier, not just add weight."""
+
+    def test_default_ceiling_is_confirmed_no_cap(self) -> None:
+        chain = EvidenceChain().add("s", "src", weight=2.0)
+        assert chain.confidence == Confidence.CONFIRMED
+        assert not chain.is_capped
+        assert chain.ceiling == Confidence.CONFIRMED
+
+    def test_cap_to_firm_overrides_high_weight(self) -> None:
+        chain = EvidenceChain().add("s", "src", weight=3.0)
+        assert chain.weight_confidence == Confidence.CONFIRMED
+        capped = chain.cap(Confidence.FIRM, "WAF present, curl-only")
+        assert capped.confidence == Confidence.FIRM
+        assert capped.is_capped
+        assert "WAF present, curl-only" in capped.gates
+
+    def test_cap_to_tentative_overrides_high_weight(self) -> None:
+        chain = EvidenceChain().add("s", "src", weight=2.5).cap(
+            Confidence.TENTATIVE, "no OOB hit"
+        )
+        assert chain.confidence == Confidence.TENTATIVE
+        assert chain.is_capped
+
+    def test_cap_is_immutable(self) -> None:
+        chain = EvidenceChain().add("s", "src", weight=2.0)
+        capped = chain.cap(Confidence.FIRM, "reason")
+        assert chain.ceiling == Confidence.CONFIRMED  # original untouched
+        assert capped.ceiling == Confidence.FIRM
+
+    def test_ceiling_only_moves_down(self) -> None:
+        chain = (
+            EvidenceChain()
+            .add("s", "src", weight=3.0)
+            .cap(Confidence.TENTATIVE, "strict gate")
+            .cap(Confidence.FIRM, "weaker gate")  # must not raise the ceiling
+        )
+        assert chain.ceiling == Confidence.TENTATIVE
+        # Both gate reasons are retained for the audit trail.
+        assert len(chain.gates) == 2
+
+    def test_cap_does_not_raise_confidence(self) -> None:
+        # Capping a low-weight chain to CONFIRMED never invents confidence.
+        chain = EvidenceChain().add("s", "src", weight=0.3)
+        assert chain.confidence == Confidence.TENTATIVE
+
+    def test_confidence_pct_clamped_to_firm_band(self) -> None:
+        chain = EvidenceChain().add("s", "src", weight=3.0)  # would be ~92%
+        capped = chain.cap(Confidence.FIRM, "gate")
+        assert capped.confidence_pct <= 79
+
+    def test_confidence_pct_clamped_to_tentative_band(self) -> None:
+        chain = EvidenceChain().add("s", "src", weight=3.0).cap(
+            Confidence.TENTATIVE, "gate"
+        )
+        assert chain.confidence_pct <= 39
+
+    def test_add_flag(self) -> None:
+        chain = EvidenceChain().add_flag("needs-browser-verification")
+        assert "needs-browser-verification" in chain.flags
+
+    def test_add_flag_dedups(self) -> None:
+        chain = (
+            EvidenceChain()
+            .add_flag("needs-browser-verification")
+            .add_flag("needs-browser-verification")
+        )
+        assert chain.flags.count("needs-browser-verification") == 1
+
+    def test_summary_includes_gates_and_flags(self) -> None:
+        chain = (
+            EvidenceChain()
+            .add("s", "src", weight=2.5)
+            .cap(Confidence.FIRM, "WAF gate")
+            .add_flag("needs-browser-verification")
+        )
+        s = chain.summary()
+        assert s["ceiling"] == "firm"
+        assert s["is_capped"] is True
+        assert "WAF gate" in s["gates"]
+        assert "needs-browser-verification" in s["flags"]
+
+
 class TestToolResult:
     def test_frozen(self) -> None:
         result = ToolResult(

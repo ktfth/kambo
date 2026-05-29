@@ -13,7 +13,8 @@ import hashlib
 import re
 from typing import Any
 
-from kambo.models import EvidenceChain
+from kambo.canary import is_orthogonal_marker, make_arithmetic_canary
+from kambo.models import Confidence, EvidenceChain
 
 
 # ---------------------------------------------------------------------------
@@ -207,6 +208,16 @@ def validate_xss(
             f"WAF detected ({', '.join(waf_detected)}) — payload may be blocked"
             " in browser even if reflected in curl response"
         )
+        # §3 WAF gate: confirmation here is curl-only (non-browser). A WAF can
+        # block in-browser while letting the raw byte through to curl, and the
+        # app may still sanitize on render. Cap at FIRM and demand a browser
+        # verification before this can be treated as exploitable.
+        chain = chain.cap(
+            Confidence.FIRM,
+            f"WAF present ({', '.join(waf_detected)}) and confirmation is "
+            "curl-only — browser execution unproven",
+        )
+        chain = chain.add_flag("needs-browser-verification")
 
     # Detect SPA frameworks — they auto-escape by default
     spa_detected = [m for m in _SPA_FRAMEWORK_MARKERS if m in raw_output]
@@ -265,6 +276,24 @@ def validate_xss(
     script_closes = len(re.findall(r"</script\s*>", window, re.IGNORECASE))
     in_script = script_opens > script_closes
 
+    # Distinguish executable JS from a non-executable data block. A reflection
+    # inside <script type="application/json"> (or ld+json, text/template, etc.)
+    # is NOT executable — doctrine I4 / anti-pattern #3.
+    in_data_block = False
+    if in_script:
+        last_script_open = re.search(
+            r"<script\b([^>]*)>(?![\s\S]*<script\b)", window, re.IGNORECASE
+        )
+        if last_script_open:
+            attrs = last_script_open.group(1).lower()
+            type_match = re.search(r'type\s*=\s*["\']?([^"\'\s>]+)', attrs)
+            if type_match and type_match.group(1) not in (
+                "text/javascript",
+                "application/javascript",
+                "module",
+            ):
+                in_data_block = True
+
     # Comment detection: check if most recent <!-- is not closed by -->
     comment_window = before_payload[max(0, len(before_payload) - 200):]
     last_open = comment_window.rfind("<!--")
@@ -275,14 +304,30 @@ def validate_xss(
     if waf_detected or spa_detected:
         context_weight = 0.2
 
-    if in_script:
+    if in_data_block:
+        # I4 gate: reflection in a non-executable data block is not a vuln.
+        chain = chain.add_fp_check(
+            "Reflection inside a non-executable <script> data block "
+            "(type != javascript) — not executable"
+        )
+        chain = chain.cap(
+            Confidence.TENTATIVE,
+            "Reflection in non-executable context (script data block) — not a "
+            "vuln until reflected in an executable context (I4)",
+        )
+    elif in_script:
         chain = chain.add(
             signal="Reflection occurs inside <script> block — high XSS probability",
             source="context_analysis",
             weight=0.7 if not waf_detected else 0.4,
         )
     elif in_comment:
+        # I4 gate: an HTML comment is not an executable context.
         chain = chain.add_fp_check("Reflection is inside HTML comment — not exploitable")
+        chain = chain.cap(
+            Confidence.TENTATIVE,
+            "Reflection in non-executable context (HTML comment) — not a vuln (I4)",
+        )
     else:
         chain = chain.add(
             signal="Reflection in HTML body context",
@@ -390,16 +435,47 @@ def validate_ssrf(
     payload: str,
     status_code: str,
     response_body: str,
+    oob_hit: bool = False,
+    oob_evidence: str = "",
 ) -> EvidenceChain:
     """Validate SSRF with response content analysis.
 
-    Status code alone is NOT sufficient. We check:
-    1. Did the server actually fetch the internal resource?
-    2. Does the response contain internal data (metadata, headers, etc.)?
-    3. Is the response different from an error page?
+    SSRF is a *blind class* (doctrine I3): the only evidence that survives a
+    target which returns a generic 200 for everything is an out-of-band hit on a
+    controlled canary host. Keyword-matching the response body is explicitly
+    forbidden as confirmation — ``iam`` matched ``enviamos``/``Diamond`` is the
+    canonical field FP (anti-pattern #2).
+
+    Therefore, without ``oob_hit`` the chain is capped at TENTATIVE no matter how
+    many body signatures appear. An OOB hit lifts the cap and contributes the
+    decisive signal.
+
+    Args:
+        payload: The SSRF payload sent (should point at a canary host).
+        status_code: HTTP status of the probe response.
+        response_body: Probe response body (used only for weak corroboration).
+        oob_hit: True iff a DNS/HTTP interaction was received on the canary host
+            and correlated to this request (P3 / OAST).
+        oob_evidence: Raw OOB interaction record proving the hit.
     """
     chain = EvidenceChain()
     body_lower = response_body.lower()
+
+    if oob_hit:
+        chain = chain.add(
+            signal="Out-of-band interaction received on canary host — server fetched attacker URL",
+            source="oast_correlation",
+            raw_data=(oob_evidence or payload)[:1000],
+            weight=2.0,
+        )
+        chain = chain.add_fp_check("OOB hit correlated to request — keyword body match not relied upon (I3)")
+    else:
+        # I3 gate: blind class with no OOB hit can never exceed TENTATIVE.
+        chain = chain.cap(
+            Confidence.TENTATIVE,
+            "No out-of-band hit on a canary host — SSRF is a blind class and "
+            "response-body keywords are forbidden as confirmation (I3)",
+        )
 
     # FP check: common non-SSRF error responses
     if re.search(r"(invalid url|bad request|url not allowed|blocked)", body_lower):
@@ -463,8 +539,9 @@ def validate_ssrf(
                 weight=0.8,
             )
 
-    # Empty or error-like response is likely a false positive
-    if len(response_body.strip()) < 10:
+    # Empty or error-like response is likely a false positive — unless an OOB
+    # hit already proved the fetch (a blind SSRF often returns no body at all).
+    if len(response_body.strip()) < 10 and not oob_hit:
         return EvidenceChain().add_fp_check("Response body too short — likely error or blocked")
 
     return chain
@@ -1317,9 +1394,15 @@ def validate_open_redirect(
 # validate_ssti — Server-Side Template Injection
 # ---------------------------------------------------------------------------
 
+# Default orthogonal canary (doctrine I2/P1): improbable arithmetic whose product
+# carries many distinct digits and cannot appear as organic page content. The old
+# default `{{7*7}}` → `49` is the doctrine's headline anti-pattern (#8) — `49`
+# occurs constantly in country IDs, prices, SVG paths.
+_SSTI_CANARY = make_arithmetic_canary()
+_SSTI_DEFAULT_PAYLOAD = "{{" + _SSTI_CANARY.expression + "}}"  # {{31337*1337}}
+_SSTI_DEFAULT_RENDER = _SSTI_CANARY.expected_render            # 41897569
+
 _SSTI_CONFIRMED_PATTERNS: list[str] = [
-    r"(?<!\d)49(?!\d)",             # {{7*7}} rendered — anchored to avoid FP on "149", "492", prices
-    r"(?<!\d)7777777(?!\d)",        # {{7*'7'}} → Python/Jinja2
     r"<class 'str'>",               # Python object exposure
     r"warning.*template.*syntax",   # Twig/Smarty error
     r"undefined.*variable.*template",  # Smarty error
@@ -1335,20 +1418,30 @@ _SSTI_FP_PATTERNS: list[str] = [
 
 def validate_ssti(
     output: str,
-    payload: str = "{{7*7}}",
-    expected_render: str = "49",
+    payload: str = _SSTI_DEFAULT_PAYLOAD,
+    expected_render: str = _SSTI_DEFAULT_RENDER,
     baseline_body: str = "",
     error_based: bool = False,
 ) -> EvidenceChain:
     """Validate Server-Side Template Injection (SSTI).
 
-    The gold standard: send {{7*7}} and check if the response contains 49.
-    Also detects Python/Jinja2 object exposure and error-based SSTI.
+    The gold standard (doctrine P1/I2): send an *orthogonal* arithmetic canary
+    — ``{{31337*1337}}`` → ``41897569`` — and check the response renders it. The
+    product carries many distinct digits and cannot occur as organic page
+    content, unlike the banned ``{{7*7}}`` → ``49``.
+
+    Confidence ceilings (doctrine I1 — "causalidade ou nada"):
+    * Render confirmed against a baseline differential (present in payload
+      response, absent in baseline) → CONFIRMED is permitted.
+    * Render confirmed from a single response with no baseline → capped at FIRM:
+      one response can't prove causality.
+    * Non-orthogonal ``expected_render`` (small number, dictionary word) → capped
+      at TENTATIVE: the marker itself is unsound (I2).
 
     Args:
         output: Response body
         payload: Template injection payload used
-        expected_render: What the payload should render to (e.g., "49" for {{7*7}})
+        expected_render: What the payload should render to (orthogonal marker)
         baseline_body: Normal response without payload for comparison
         error_based: Whether to detect error-based SSTI (verbose errors)
     """
@@ -1356,6 +1449,16 @@ def validate_ssti(
 
     if not output or not output.strip():
         return chain.add_fp_check("Empty output — no SSTI evidence")
+
+    # I2 gate: an unsound marker can never confirm. Record it up front so the
+    # ceiling applies no matter which signals fire below.
+    marker_is_orthogonal = is_orthogonal_marker(expected_render)
+    if expected_render and not marker_is_orthogonal:
+        chain = chain.cap(
+            Confidence.TENTATIVE,
+            f"Non-orthogonal SSTI marker {expected_render!r} — occurs naturally in "
+            "content (I2); use improbable arithmetic like {{31337*1337}}",
+        )
 
     # FP check: payload reflected literally (not rendered)
     _render_pattern = rf"(?<!\d){re.escape(expected_render)}(?!\d)" if expected_render else ""
@@ -1387,6 +1490,16 @@ def validate_ssti(
             raw_data=_extract_context(output, re.escape(expected_render)),
             weight=2.0,
         )
+        # I1 gate: a render in a single response proves the marker appeared, not
+        # that the payload *caused* it. Without a differential baseline that
+        # lacked the render, cap at FIRM.
+        has_differential = bool(baseline_body) and not re.search(_render_pattern, baseline_body)
+        if not has_differential:
+            chain = chain.cap(
+                Confidence.FIRM,
+                "SSTI render observed in a single response with no baseline "
+                "differential — causality unproven (I1); re-test with a control",
+            )
 
     # Secondary signal: Python object exposure (Jinja2/Tornado/Mako)
     python_exposure_patterns = [
@@ -1406,7 +1519,7 @@ def validate_ssti(
 
     # Error-based SSTI signals
     if error_based:
-        for pattern in _SSTI_CONFIRMED_PATTERNS[3:]:  # error patterns
+        for pattern in _SSTI_CONFIRMED_PATTERNS[1:]:  # error patterns (skip <class 'str'>)
             if re.search(pattern, output, re.IGNORECASE):
                 chain = chain.add(
                     signal=f"Template engine error exposed: {pattern}",

@@ -9,6 +9,21 @@ import pytest
 from tests.conftest import patch_runner
 
 
+class TestCloudImdsTest:
+    @pytest.mark.asyncio
+    async def test_imds_metadata_without_oob_not_vulnerable(self) -> None:
+        """IMDS SSRF is a blind class — body metadata keywords without an OOB hit
+        stay TENTATIVE and are not 'vulnerable' (I3). Also exercises the
+        cloud_imds_test code path end-to-end."""
+        output = "HTTP/1.1 200 OK\r\n\r\nami-id\ninstance-id\nsecurity-credentials"
+        with patch_runner({"cloud_imds_test": output}):
+            from kambo.tools.cloud import cloud_imds_test
+            result = await cloud_imds_test("http://example.com/fetch?url=x", parameter="url")
+
+        assert result["vulnerable"] is False
+        assert result["confidence"] == "tentative"
+
+
 class TestCloudStorageEnum:
     @pytest.mark.asyncio
     async def test_public_s3_bucket(self) -> None:
@@ -69,3 +84,25 @@ class TestCloudSecretScan:
 
         assert result["secrets_found"] == 0
         assert result["vulnerable"] is False
+
+    @pytest.mark.asyncio
+    async def test_many_unverified_secrets_capped_tentative(self) -> None:
+        """Liveness gate (§5): many unverified critical secrets accumulate weight
+        but, with no liveness check, never exceed TENTATIVE."""
+        lines = "\n".join(
+            json.dumps({
+                "DetectorName": "AWS",
+                "Verified": False,
+                "SourceMetadata": {"Data": {"Filesystem": {"file": f"f{i}.env"}}},
+            })
+            for i in range(8)  # 8 × 0.5 = 4.0 weight — would be CONFIRMED uncapped
+        )
+        with patch_runner({"cloud_secret_scan": lines}):
+            from kambo.tools.cloud import cloud_secret_scan
+            result = await cloud_secret_scan("example.com")
+
+        assert result["secrets_found"] == 8
+        assert result["verified_count"] == 0
+        assert result["confidence"] == "tentative"
+        assert result["vulnerable"] is False
+        assert any("liveness" in g.lower() for g in result["evidence"]["gates"])

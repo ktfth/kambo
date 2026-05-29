@@ -8,9 +8,16 @@ Every tool returns an evidence chain with weighted signals. Confidence levels:
 
 from __future__ import annotations
 
+from kambo.canary import make_arithmetic_canary
 from kambo.docker_runner import get_runner
 from kambo.metrics import get_metrics
-from kambo.models import EvidenceChain, Phase
+from kambo.models import (
+    Confidence,
+    EvidenceChain,
+    Phase,
+    chain_rank,
+    confidence_meets,
+)
 from kambo.parsers.generic_parser import parse_json_output
 from kambo.scope import validate_scope
 from kambo.validation import (
@@ -31,7 +38,6 @@ from kambo.validation import (
     validate_xss,
     validate_xxe,
 )
-
 
 async def vuln_sqli(
     target: str,
@@ -126,11 +132,13 @@ async def vuln_xss(
         resp_body = parts[1] if len(parts) > 1 else result.raw_output
         chain = validate_xss(resp_body, payload, parameter or "q", response_headers=resp_headers)
 
-        if chain.total_weight > best_chain.total_weight:
+        # Rank by effective confidence first, then weight — a gated TENTATIVE
+        # chain with high weight must never outrank a genuine FIRM one (§6).
+        if chain_rank(chain) > chain_rank(best_chain):
             best_chain = chain
 
-        # Stop if we already have strong evidence
-        if best_chain.total_weight >= 1.5:
+        # Stop only once we have strong, un-gated evidence.
+        if confidence_meets(best_chain.confidence, Confidence.FIRM):
             break
 
     metrics.record_run("vuln_xss")
@@ -139,7 +147,9 @@ async def vuln_xss(
 
     return {
         "target": target,
-        "vulnerable": best_chain.total_weight >= 1.0,
+        # Verdict honors the ceiling: a WAF-gated (curl-only) or non-executable
+        # context reflection does not count as exploitable here.
+        "vulnerable": confidence_meets(best_chain.confidence, Confidence.FIRM),
         "confidence": best_chain.confidence.value,
         "evidence": best_chain.summary(),
         "raw": result.raw_output[:3000],
@@ -206,14 +216,18 @@ async def vuln_ssrf(
         if chain.total_weight > best_chain.total_weight:
             best_chain = chain
 
-    # OOB callback test if URL provided
+    # OOB callback test if URL provided. We can only *send* the probe here — this
+    # single-shot tool cannot poll the collaborator. Per I3, confirmation
+    # requires a received-and-correlated hit, so we add NO confirming weight;
+    # instead we flag that external correlation is pending. Only once a hit is
+    # observed should validate_ssrf be re-run with oob_hit=True to lift the cap.
     if callback_url:
         cmd = f'curl -s "{target}?{parameter}={callback_url}" 2>/dev/null'
         await runner.run(cmd, "vuln_ssrf_oob", target, Phase.VULN_ANALYSIS, timeout=15)
-        best_chain = best_chain.add(
-            signal=f"OOB callback sent to {callback_url} — check collaborator for interaction",
-            source="ssrf_oob",
-            weight=0.3,  # only confirmed if callback received
+        best_chain = best_chain.add_flag("oob-correlation-pending")
+        best_chain = best_chain.add_fp_check(
+            f"OOB probe sent to {callback_url} — poll the collaborator; a received "
+            "hit confirms SSRF (I3), no hit means no SSRF"
         )
 
     metrics.record_run("vuln_ssrf")
@@ -222,8 +236,10 @@ async def vuln_ssrf(
 
     return {
         "target": target,
+        # Verdict honors the ceiling: without an OOB hit, SSRF stays TENTATIVE
+        # (I3) no matter how many body keywords matched.
+        "vulnerable": confidence_meets(best_chain.confidence, Confidence.FIRM),
         "parameter": parameter,
-        "vulnerable": best_chain.total_weight >= 1.0,
         "confidence": best_chain.confidence.value,
         "evidence": best_chain.summary(),
         "results": results_list,
@@ -415,7 +431,10 @@ async def vuln_ssti(
 ) -> dict:
     """Server-Side Template Injection detection.
 
-    Tests template expression rendering — {{7*7}}→49 is the gold standard.
+    Uses an orthogonal arithmetic canary — {{31337*1337}}→41897569 (doctrine
+    I2/P1). The product carries many distinct digits and cannot occur as organic
+    page content, unlike the banned {{7*7}}→49. A baseline is captured so the
+    render can be confirmed differentially (I1).
     Detects Jinja2, Twig, Smarty, Freemarker, Velocity, Pebble.
 
     Args:
@@ -429,21 +448,25 @@ async def vuln_ssti(
 
     url = target if target.startswith("http") else f"https://{target}"
 
-    # Engine-specific payloads → expected output
+    # Orthogonal canary shared across engines — only the delimiter syntax varies.
+    canary = make_arithmetic_canary()
+    expr, render = canary.expression, canary.expected_render
+
+    # Engine-specific delimiters → same improbable render.
     payloads: list[tuple[str, str, str]] = [
-        ("{{7*7}}", "49", "jinja2/twig"),
-        ("${7*7}", "49", "freemarker/velocity"),
-        ("{{7*'7'}}", "7777777", "jinja2-python"),
-        ("<%= 7*7 %>", "49", "erb/ejs"),
-        ("#{7*7}", "49", "ruby-interpolation"),
+        ("{{" + expr + "}}", render, "jinja2/twig"),
+        ("${" + expr + "}", render, "freemarker/velocity"),
+        ("<%= " + expr + " %>", render, "erb/ejs"),
+        ("#{" + expr + "}", render, "ruby-interpolation"),
+        ("{" + expr + "}", render, "smarty-math"),
     ]
 
     if engine != "auto":
         engine_map = {
-            "jinja2": [("{{7*7}}", "49", "jinja2"), ("{{7*'7'}}", "7777777", "jinja2-python")],
-            "twig": [("{{7*7}}", "49", "twig")],
-            "smarty": [("{$smarty.version}", "", "smarty"), ("{7*7}", "49", "smarty-math")],
-            "velocity": [("${7*7}", "49", "velocity")],
+            "jinja2": [("{{" + expr + "}}", render, "jinja2")],
+            "twig": [("{{" + expr + "}}", render, "twig")],
+            "smarty": [("{$smarty.version}", "", "smarty"), ("{" + expr + "}", render, "smarty-math")],
+            "velocity": [("${" + expr + "}", render, "velocity")],
         }
         payloads = engine_map.get(engine, payloads)
 
@@ -452,8 +475,7 @@ async def vuln_ssti(
     baseline_result = await runner.run(cmd_baseline, "vuln_ssti_baseline", target, Phase.VULN_ANALYSIS, timeout=20)
     baseline_body = baseline_result.raw_output
 
-    chain = EvidenceChain()
-    chain = chain.set_baseline({"body_length": len(baseline_body)})
+    chain = EvidenceChain().set_baseline({"body_length": len(baseline_body)})
 
     results: list[dict] = []
     for payload, expected, engine_name in payloads:
@@ -470,12 +492,9 @@ async def vuln_ssti(
             baseline_body=baseline_body,
         )
         if ssti_chain.total_weight > 0:
-            chain = chain.add(
-                signal=f"SSTI confirmed: {engine_name} — {payload!r} rendered to {expected!r}",
-                source="vuln_ssti",
-                raw_data=result.raw_output[:500],
-                weight=ssti_chain.total_weight,
-            )
+            # Adopt the validator's chain wholesale — re-wrapping into a fresh
+            # chain would silently drop the ceiling/gates it computed (I1/I2).
+            chain = ssti_chain.set_baseline({"body_length": len(baseline_body)})
             results.append({
                 "payload": payload,
                 "expected": expected,
@@ -492,7 +511,9 @@ async def vuln_ssti(
     return {
         "target": target,
         "parameter": parameter,
-        "vulnerable": chain.total_weight >= 1.0,
+        # Verdict honors the ceiling, not raw weight: a capped finding (no
+        # differential, non-orthogonal marker) is not "vulnerable".
+        "vulnerable": confidence_meets(chain.confidence, Confidence.FIRM),
         "confidence": chain.confidence.value,
         "evidence": chain.summary(),
         "ssti_results": results,

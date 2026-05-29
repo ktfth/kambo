@@ -41,6 +41,31 @@ class Confidence(str, Enum):
     TENTATIVE = "tentative"
 
 
+# Strict ordering of confidence tiers — used by the ceiling/gate mechanism to
+# compare and cap tiers. Higher rank = stronger confidence.
+_CONFIDENCE_RANK: dict[Confidence, int] = {
+    Confidence.TENTATIVE: 0,
+    Confidence.FIRM: 1,
+    Confidence.CONFIRMED: 2,
+}
+
+
+def confidence_meets(value: Confidence, minimum: Confidence) -> bool:
+    """True iff ``value`` is at least as strong as ``minimum``.
+
+    Use this for verdicts ("is it vulnerable?") so a gated ceiling is honored —
+    never decide off raw weight, which ignores caps (doctrine §3/§6).
+    """
+    return _CONFIDENCE_RANK[value] >= _CONFIDENCE_RANK[minimum]
+
+
+def chain_rank(chain: "EvidenceChain") -> tuple[int, float]:
+    """Comparable key for picking the strongest of several chains: effective
+    confidence first (so gates are honored), then accumulated weight as a
+    tie-breaker. Use instead of comparing raw ``total_weight`` (doctrine §6)."""
+    return (_CONFIDENCE_RANK[chain.confidence], chain.total_weight)
+
+
 class Context(str, Enum):
     PENTEST = "pentest"
     BUG_BOUNTY = "bug_bounty"
@@ -61,22 +86,34 @@ class EvidenceItem(BaseModel):
 class EvidenceChain(BaseModel):
     """Structured evidence chain that supports or refutes a finding.
 
-    Confidence is computed from the weighted evidence items:
+    Confidence is computed from the weighted evidence items, then **capped** by
+    any gates that apply (doctrine §3 — "sinais que CAPEIAM, não que somam"):
+
+    Weight-derived tier:
     - Total weight >= 2.0 → CONFIRMED
     - Total weight >= 1.0 → FIRM
     - Total weight > 0.0  → TENTATIVE
+
+    Effective confidence = min(weight-derived tier, ``ceiling``). A gate lowers
+    the ceiling regardless of how much positive weight accumulated. This is how
+    the invariants are enforced structurally: e.g. a blind class with no OOB hit
+    is capped at TENTATIVE even if keyword signals piled up weight.
     """
 
     items: list[EvidenceItem] = Field(default_factory=list)
     baseline: dict[str, Any] = Field(default_factory=dict)  # baseline response for comparison
     false_positive_checks: list[str] = Field(default_factory=list)  # checks performed to rule out FP
+    ceiling: Confidence = Confidence.CONFIRMED  # hard cap on confidence tier (default: no cap)
+    gates: list[str] = Field(default_factory=list)  # reasons the ceiling was lowered
+    flags: list[str] = Field(default_factory=list)  # actionable flags, e.g. needs-browser-verification
 
     @property
     def total_weight(self) -> float:
         return sum(item.weight for item in self.items)
 
     @property
-    def confidence(self) -> Confidence:
+    def weight_confidence(self) -> Confidence:
+        """Tier derived purely from accumulated weight, ignoring gates."""
         w = self.total_weight
         if w >= 2.0:
             return Confidence.CONFIRMED
@@ -85,25 +122,47 @@ class EvidenceChain(BaseModel):
         return Confidence.TENTATIVE
 
     @property
-    def confidence_pct(self) -> int:
-        """0-100 percentage representing confidence strength within tier.
+    def confidence(self) -> Confidence:
+        """Effective confidence — weight-derived tier capped by the ceiling."""
+        weight_tier = self.weight_confidence
+        if _CONFIDENCE_RANK[weight_tier] <= _CONFIDENCE_RANK[self.ceiling]:
+            return weight_tier
+        return self.ceiling
 
-        Mapping:
+    @property
+    def is_capped(self) -> bool:
+        """True when a gate lowered the effective confidence below its weight tier."""
+        return _CONFIDENCE_RANK[self.weight_confidence] > _CONFIDENCE_RANK[self.ceiling]
+
+    @property
+    def confidence_pct(self) -> int:
+        """0-100 percentage representing confidence strength within the effective tier.
+
+        Mapping (before capping):
           TENTATIVE (weight 0.0–0.99): 10–39%   — single signal, high FP risk
           FIRM      (weight 1.0–1.99): 50–79%   — multiple signals, reportable with caveats
           CONFIRMED (weight 2.0+):     85–99%   — exploit-grade, ready to submit
+
+        When a gate caps the tier, the percentage is clamped to the top of the
+        capped tier's band (FIRM → max 79, TENTATIVE → max 39) so the number can
+        never imply a confidence the gate has forbidden.
         """
         w = self.total_weight
         if w >= 2.0:
-            # Confirmed tier: starts at 85, caps at 99
-            return min(99, 85 + int((w - 2.0) * 7))
-        if w >= 1.0:
-            # Firm tier: 50–79, scales within the 1.0–2.0 range
-            return 50 + int((w - 1.0) * 29)
-        # Tentative tier: 10–39 (0.0 weight = 0% — no evidence at all)
-        if w == 0:
-            return 0
-        return max(10, min(39, 10 + int(w * 29)))
+            pct = min(99, 85 + int((w - 2.0) * 7))
+        elif w >= 1.0:
+            pct = 50 + int((w - 1.0) * 29)
+        elif w == 0:
+            pct = 0
+        else:
+            pct = max(10, min(39, 10 + int(w * 29)))
+
+        # Clamp into the effective (capped) tier's band.
+        if self.ceiling == Confidence.FIRM:
+            pct = min(pct, 79)
+        elif self.ceiling == Confidence.TENTATIVE:
+            pct = min(pct, 39)
+        return pct
 
     def add(self, signal: str, source: str, raw_data: str = "", weight: float = 1.0) -> EvidenceChain:
         """Return a new chain with the evidence item appended (immutable)."""
@@ -113,6 +172,30 @@ class EvidenceChain(BaseModel):
     def add_fp_check(self, check: str) -> EvidenceChain:
         """Record a false-positive check that was performed."""
         return self.model_copy(update={"false_positive_checks": [*self.false_positive_checks, check]})
+
+    def cap(self, level: Confidence, reason: str) -> EvidenceChain:
+        """Lower the confidence ceiling to ``level`` (a gate).
+
+        The ceiling only ever moves *down*. Applying a stricter-or-equal cap than
+        the default CONFIRMED records the gate reason (so the audit trail keeps
+        every gate that constrained the finding, including a weaker cap layered
+        after a stronger one). Capping to CONFIRMED is meaningless — it can never
+        constrain anything — so it is a true no-op and is not recorded. §3.
+        """
+        if level == Confidence.CONFIRMED:
+            return self  # no-op: CONFIRMED is the default ceiling, caps nothing
+        new_ceiling = self.ceiling
+        if _CONFIDENCE_RANK[level] < _CONFIDENCE_RANK[self.ceiling]:
+            new_ceiling = level
+        return self.model_copy(
+            update={"ceiling": new_ceiling, "gates": [*self.gates, reason]}
+        )
+
+    def add_flag(self, flag: str) -> EvidenceChain:
+        """Attach an actionable flag (e.g. 'needs-browser-verification')."""
+        if flag in self.flags:
+            return self
+        return self.model_copy(update={"flags": [*self.flags, flag]})
 
     def set_baseline(self, baseline: dict[str, Any]) -> EvidenceChain:
         """Set the baseline response used for comparison."""
@@ -126,6 +209,10 @@ class EvidenceChain(BaseModel):
             "signal_count": len(self.items),
             "signals": [item.signal for item in self.items],
             "fp_checks_performed": self.false_positive_checks,
+            "ceiling": self.ceiling.value,
+            "is_capped": self.is_capped,
+            "gates": self.gates,
+            "flags": self.flags,
         }
 
 

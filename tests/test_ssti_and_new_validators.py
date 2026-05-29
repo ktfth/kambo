@@ -32,15 +32,21 @@ class TestValidateSsti:
         assert chain.total_weight == 0
         assert len(chain.false_positive_checks) >= 1
 
-    def test_rendered_expression_confirmed(self) -> None:
-        """{{7*7}} renders to 49 → CONFIRMED SSTI."""
+    def test_rendered_orthogonal_single_response_capped_firm(self) -> None:
+        """Orthogonal render in a single response (no baseline) → FIRM, not CONFIRMED.
+
+        Doctrine I1: one response proves the marker appeared, not that the
+        payload caused it. CONFIRMED requires a differential.
+        """
         chain = validate_ssti(
-            output="Welcome! Result: 49 and more content here.",
-            payload="{{7*7}}",
-            expected_render="49",
+            output="Welcome! Result: 41897569 and more content here.",
+            payload="{{31337*1337}}",
+            expected_render="41897569",
         )
-        assert chain.confidence == Confidence.CONFIRMED
         assert chain.total_weight >= 2.0
+        assert chain.confidence == Confidence.FIRM
+        assert chain.is_capped
+        assert any("I1" in g for g in chain.gates)
 
     def test_python_object_exposure(self) -> None:
         """Jinja2 object exposure via class introspection."""
@@ -53,14 +59,19 @@ class TestValidateSsti:
         assert chain.confidence in (Confidence.CONFIRMED, Confidence.FIRM)
 
     def test_rendered_plus_baseline_diff(self) -> None:
-        """Render confirmed + response differs from baseline → CONFIRMED."""
+        """Orthogonal render present in payload, absent in baseline → CONFIRMED.
+
+        This is the differential the doctrine (I1) demands: the marker appears
+        only in the payload response, proving causality.
+        """
         chain = validate_ssti(
-            output="Value=49 computed",
-            payload="{{7*7}}",
-            expected_render="49",
+            output="Value=41897569 computed",
+            payload="{{31337*1337}}",
+            expected_render="41897569",
             baseline_body="Value=EXPRESSION computed",
         )
         assert chain.confidence == Confidence.CONFIRMED
+        assert not chain.is_capped
 
     def test_engine_rejection_is_fp(self) -> None:
         chain = validate_ssti(
@@ -70,14 +81,20 @@ class TestValidateSsti:
         )
         assert chain.total_weight == 0
 
-    def test_jinja2_python_variant(self) -> None:
-        """{{7*'7'}} → 7777777 is Jinja2/Python specific."""
+    def test_repdigit_marker_is_non_orthogonal_capped(self) -> None:
+        """{{7*'7'}} → 7777777 is a repdigit — non-orthogonal marker (I2).
+
+        Low digit variety means it can occur naturally; the marker is unsound
+        and the finding is capped at TENTATIVE regardless of the render match.
+        """
         chain = validate_ssti(
             output="output: 7777777 end",
             payload="{{7*'7'}}",
             expected_render="7777777",
         )
-        assert chain.confidence == Confidence.CONFIRMED
+        assert chain.confidence == Confidence.TENTATIVE
+        assert chain.is_capped
+        assert any("I2" in g for g in chain.gates)
 
     def test_error_based_detection(self) -> None:
         chain = validate_ssti(
@@ -118,13 +135,13 @@ class TestValidateSsti:
         assert any("baseline" in fp.lower() for fp in chain.false_positive_checks)
 
     def test_expected_render_absent_from_baseline_is_real(self) -> None:
-        """If '49' is NOT in baseline but IS in payload response, it's real SSTI."""
+        """Orthogonal marker absent in baseline but present in payload → real SSTI."""
         baseline = "<html><body>Normal page without the number</body></html>"
-        output = "<html><body>Result: 49</body></html>"
+        output = "<html><body>Result: 41897569</body></html>"
         chain = validate_ssti(
             output=output,
-            payload="{{7*7}}",
-            expected_render="49",
+            payload="{{31337*1337}}",
+            expected_render="41897569",
             baseline_body=baseline,
         )
         assert chain.total_weight >= 2.0

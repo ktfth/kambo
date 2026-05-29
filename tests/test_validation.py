@@ -150,6 +150,48 @@ class TestXssValidation:
         chain = validate_xss(response, payload, "q")
         assert any("WAF" in fp for fp in chain.false_positive_checks)
 
+    def test_waf_gate_caps_firm_and_flags_browser(self) -> None:
+        """§3 WAF gate: curl-only confirmation behind a WAF caps at FIRM and
+        demands browser verification."""
+        payload = "'-alert(1)-'"
+        # Strong in-script reflection that would otherwise accrue high weight.
+        response = f"<html><script>var x = '{payload}';</script></html>"
+        headers = "HTTP/2 200\r\nserver: cloudflare\r\ncf-ray: abc123"
+        chain = validate_xss(response, payload, "q", response_headers=headers)
+        assert chain.confidence != Confidence.CONFIRMED
+        assert chain.ceiling == Confidence.FIRM
+        assert "needs-browser-verification" in chain.flags
+        assert any("WAF" in g for g in chain.gates)
+
+    def test_non_executable_data_block_caps_tentative(self) -> None:
+        """I4 / anti-pattern #3: reflection in <script type=application/json> is
+        not executable — capped TENTATIVE."""
+        payload = '"><img src=x onerror=alert(1)>'
+        response = (
+            '<html><head><script type="application/json">'
+            f'{{"q":"{payload}"}}</script></head></html>'
+        )
+        chain = validate_xss(response, payload, "q")
+        assert chain.confidence == Confidence.TENTATIVE
+        assert chain.ceiling == Confidence.TENTATIVE
+        assert any("I4" in g for g in chain.gates)
+
+    def test_executable_script_block_not_capped_by_data_gate(self) -> None:
+        """A genuine executable <script> (no/JS type) is NOT treated as a data
+        block."""
+        payload = "'-alert(1)-'"
+        response = f'<html><script type="text/javascript">var x = \'{payload}\';</script></html>'
+        chain = validate_xss(response, payload, "q")
+        assert not any("data block" in g for g in chain.gates)
+
+    def test_comment_context_caps_tentative(self) -> None:
+        """I4: reflection inside an HTML comment is not executable."""
+        payload = "<svg onload=alert(1)>"
+        response = f"<html><body><!-- user note: {payload} --></body></html>"
+        chain = validate_xss(response, payload, "q")
+        assert chain.confidence == Confidence.TENTATIVE
+        assert chain.ceiling == Confidence.TENTATIVE
+
 
 # ---------------------------------------------------------------------------
 # CORS validation
@@ -203,11 +245,29 @@ class TestSsrfValidation:
         chain = validate_ssrf("http://169.254.169.254/", "200", "")
         assert chain.total_weight == 0.0
 
-    def test_200_with_cloud_metadata(self) -> None:
+    def test_200_with_cloud_metadata_no_oob_capped_tentative(self) -> None:
+        """Body keyword signatures accumulate weight but, with no OOB hit, the
+        finding is capped at TENTATIVE — doctrine I3 forbids keyword-matching as
+        confirmation for a blind class."""
         body = "ami-id\ninstance-id\nsecurity-credentials\niam"
         chain = validate_ssrf("http://169.254.169.254/", "200", body)
-        assert chain.confidence in (Confidence.FIRM, Confidence.CONFIRMED)
         assert chain.total_weight >= 1.0
+        assert chain.confidence == Confidence.TENTATIVE
+        assert chain.is_capped
+        assert any("I3" in g for g in chain.gates)
+
+    def test_oob_hit_confirms_ssrf(self) -> None:
+        """An out-of-band interaction on the canary host lifts the cap and
+        confirms (P3 / OAST)."""
+        chain = validate_ssrf(
+            "http://canary.oast.example/abc",
+            "200",
+            "",
+            oob_hit=True,
+            oob_evidence="DNS lookup canary.oast.example from 10.0.0.5 at 12:00:01",
+        )
+        assert chain.confidence == Confidence.CONFIRMED
+        assert not chain.is_capped
 
     def test_200_with_internal_content(self) -> None:
         body = "root:x:0:0:root:/root:/bin/bash"

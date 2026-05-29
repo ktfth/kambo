@@ -7,7 +7,13 @@ import re
 
 from kambo.docker_runner import get_runner
 from kambo.metrics import get_metrics
-from kambo.models import EvidenceChain, Phase
+from kambo.models import (
+    Confidence,
+    EvidenceChain,
+    Phase,
+    chain_rank,
+    confidence_meets,
+)
 from kambo.scope import validate_scope
 from kambo.validation import validate_ssrf
 
@@ -69,7 +75,8 @@ async def cloud_imds_test(
             "response_preview": result.raw_output[:1000],
         })
 
-        if chain.total_weight > best_chain.total_weight:
+        # Rank by effective confidence first (honors the I3 cap), then weight.
+        if chain_rank(chain) > chain_rank(best_chain):
             best_chain = chain
 
     metrics.record_run("cloud_imds_test")
@@ -79,7 +86,8 @@ async def cloud_imds_test(
     return {
         "target": target,
         "cloud_provider": cloud_provider,
-        "vulnerable": best_chain.total_weight >= 1.0,
+        # IMDS SSRF is a blind class: without an OOB hit it stays TENTATIVE (I3).
+        "vulnerable": confidence_meets(best_chain.confidence, Confidence.FIRM),
         "confidence": best_chain.confidence.value,
         "evidence": best_chain.summary(),
         "results": results,
@@ -258,16 +266,28 @@ async def cloud_secret_scan(
         except (json.JSONDecodeError, KeyError):
             continue
 
+    # Liveness gate (doctrine §3 / §5): a secret with no liveness check is capped
+    # at TENTATIVE for valuation, no matter how many unverified hits piled up
+    # weight. Only an actually-verified (live) secret lifts the cap.
+    verified_count = sum(1 for s in secrets if s.get("verified"))
+    if secrets and verified_count == 0:
+        chain = chain.cap(
+            Confidence.TENTATIVE,
+            "Secret(s) found but none passed a liveness/verification check — "
+            "a dead or placeholder secret has no value (§5)",
+        )
+
     metrics.record_run("cloud_secret_scan")
     if chain.total_weight > 0:
         metrics.record_finding("cloud_secret_scan", chain.confidence, chain.total_weight)
 
     return {
         "target": target,
-        "vulnerable": chain.total_weight >= 1.0,
+        # Verdict honors the ceiling — unverified-only secrets are not "vulnerable".
+        "vulnerable": confidence_meets(chain.confidence, Confidence.FIRM),
         "confidence": chain.confidence.value,
         "evidence": chain.summary(),
         "secrets_found": len(secrets),
         "secrets": secrets,
-        "verified_count": sum(1 for s in secrets if s.get("verified")),
+        "verified_count": verified_count,
     }
