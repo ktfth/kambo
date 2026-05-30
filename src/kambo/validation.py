@@ -1490,16 +1490,6 @@ def validate_ssti(
             raw_data=_extract_context(output, re.escape(expected_render)),
             weight=2.0,
         )
-        # I1 gate: a render in a single response proves the marker appeared, not
-        # that the payload *caused* it. Without a differential baseline that
-        # lacked the render, cap at FIRM.
-        has_differential = bool(baseline_body) and not re.search(_render_pattern, baseline_body)
-        if not has_differential:
-            chain = chain.cap(
-                Confidence.FIRM,
-                "SSTI render observed in a single response with no baseline "
-                "differential — causality unproven (I1); re-test with a control",
-            )
 
     # Secondary signal: Python object exposure (Jinja2/Tornado/Mako)
     python_exposure_patterns = [
@@ -1537,6 +1527,26 @@ def validate_ssti(
                 source="ssti_baseline_comparison",
                 weight=0.5,
             )
+
+    # I1 gate (covers ALL signal paths, not just the render branch): SSTI is a
+    # reflexive class. The only differential proof we accept is the orthogonal
+    # render present in the payload response and absent from a baseline. Any
+    # other single-response evidence (Python-object exposure, error-based
+    # exceptions, or a render with no baseline) proves the marker appeared, not
+    # that the payload *caused* it — so it is capped at FIRM. Without this,
+    # exposure(1.5) + error(0.8) = 2.3 would reach CONFIRMED from one response.
+    render_in_output = bool(_render_pattern) and bool(re.search(_render_pattern, output))
+    has_differential = (
+        render_in_output
+        and bool(baseline_body)
+        and not re.search(_render_pattern, baseline_body)
+    )
+    if chain.total_weight > 0 and not has_differential:
+        chain = chain.cap(
+            Confidence.FIRM,
+            "Single-response SSTI evidence with no baseline differential — "
+            "causality unproven (I1); re-test with a benign control request",
+        )
 
     return chain
 

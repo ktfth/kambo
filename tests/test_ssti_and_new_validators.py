@@ -58,6 +58,21 @@ class TestValidateSsti:
         assert chain.total_weight >= 1.5
         assert chain.confidence in (Confidence.CONFIRMED, Confidence.FIRM)
 
+    def test_exposure_plus_error_single_response_capped_firm(self) -> None:
+        """I1: Python exposure (1.5) + error-based (0.8) = 2.3 would be CONFIRMED
+        on raw weight, but with no baseline differential it must cap at FIRM —
+        one response can't prove the payload caused the evidence."""
+        chain = validate_ssti(
+            output="<class 'str'> and org.springframework.expression error",
+            payload="{{''.__class__}}",
+            expected_render="",
+            error_based=True,
+        )
+        assert chain.total_weight >= 2.0
+        assert chain.confidence == Confidence.FIRM
+        assert chain.is_capped
+        assert any("I1" in g for g in chain.gates)
+
     def test_rendered_plus_baseline_diff(self) -> None:
         """Orthogonal render present in payload, absent in baseline → CONFIRMED.
 
