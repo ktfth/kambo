@@ -262,13 +262,26 @@ class TestValidateDeserialization:
         assert chain.total_weight == 0
         assert len(chain.false_positive_checks) >= 1
 
-    def test_rce_via_expected_output(self) -> None:
+    def test_rce_via_expected_output_single_response_capped_firm(self) -> None:
+        """I1: command output in a single response (no time differential / OOB)
+        caps at FIRM."""
         chain = validate_deserialization(
             output="uid=33(www-data) gid=33(www-data) groups=33(www-data)",
             expected_output="www-data",
         )
-        assert chain.confidence == Confidence.CONFIRMED
         assert chain.total_weight >= 2.0
+        assert chain.confidence == Confidence.FIRM
+        assert any("I1" in g for g in chain.gates)
+
+    def test_oob_hit_confirms_deserialization(self) -> None:
+        """A correlated OOB hit confirms blind deserialization (P3)."""
+        chain = validate_deserialization(
+            output="",
+            payload_type="java",
+            oob_hit=True,
+            oob_evidence="DNS canary.oast.example received",
+        )
+        assert chain.confidence == Confidence.CONFIRMED
 
     def test_java_gadget_chain(self) -> None:
         chain = validate_deserialization(
@@ -284,11 +297,14 @@ class TestValidateDeserialization:
         )
         assert chain.total_weight >= 1.5
 
-    def test_oob_callback_signal(self) -> None:
+    def test_oob_token_in_body_does_not_confirm(self) -> None:
+        """I3: OOB token echoed in the body is reflection, not a received
+        callback — it does not confirm deserialization."""
         chain = validate_deserialization(
             output="DNS callback received from attacker.burpcollaborator.net",
         )
-        assert chain.total_weight >= 1.5
+        assert chain.confidence == Confidence.TENTATIVE
+        assert any("I3" in fp for fp in chain.false_positive_checks)
 
     def test_time_based_long_delay(self) -> None:
         chain = validate_deserialization(

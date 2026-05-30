@@ -7,7 +7,7 @@ import re
 from functools import wraps
 from typing import Any, Callable
 
-from kambo.models import EngagementScope, ScopeTarget
+from kambo.models import Context, EngagementScope
 
 
 class ScopeViolationError(Exception):
@@ -20,6 +20,70 @@ class ScopeViolationError(Exception):
         if reason:
             msg += f": {reason}"
         super().__init__(msg)
+
+
+# Pentest-only capability families (doctrine §5). In a bug bounty engagement,
+# *merely running* these is a program violation and an account-ban risk — there
+# is no post-exploitation, no Active Directory attack, no lateral movement, no
+# credential dumping, no privilege escalation beyond detection. The ceiling is
+# checked BEFORE dispatch, never after.
+PENTEST_ONLY_TOOLS: frozenset[str] = frozenset(
+    {
+        # Active Directory attacks
+        "ad_bloodhound",
+        "ad_kerberoast",
+        "ad_asrep_roast",
+        "ad_pass_the_hash",
+        "ad_dcsync",
+        "ad_certify",
+        "ad_ntlm_relay",
+        # Post-exploitation (foothold-dependent — no foothold exists in bounty)
+        "post_privesc_linux",
+        "post_privesc_windows",
+        "post_ad_enum",
+        "post_kerberoast",
+        "post_lateral_move",
+        "post_cred_dump",
+    }
+)
+
+
+class PentestModeRequiredError(Exception):
+    """Raised when a pentest-only capability is invoked in a bug bounty engagement.
+
+    Bug bounty is NOT pentest: the flow is locked deliberately. See doctrine §5.
+    """
+
+    def __init__(self, tool_name: str, context: Context | None):
+        self.tool_name = tool_name
+        self.context = context
+        ctx = context.value if context else "no-scope"
+        super().__init__(
+            f"🔒 LOCKED: '{tool_name}' is a pentest-only capability and is "
+            f"disabled in this engagement (context: {ctx}).\n"
+            "Bug bounty ≠ pentest. Post-exploitation, Active Directory attacks, "
+            "lateral movement, credential dumping and privilege escalation are "
+            "program violations in bug bounty and risk an account ban (doctrine "
+            "§5). They require an explicit PENTEST engagement with authorization.\n"
+            "If you genuinely have a pentest engagement, set the scope context to "
+            "'pentest' before invoking this tool."
+        )
+
+
+def require_pentest_mode(tool_name: str) -> None:
+    """Enforce the §5 ceiling: block pentest-only tools outside a PENTEST context.
+
+    Raises ``PentestModeRequiredError`` for bug bounty engagements (and when no
+    scope/context is configured, since we cannot assert authorization). CTF and
+    PENTEST contexts are allowed — exploitation is in-bounds there.
+    """
+    if tool_name not in PENTEST_ONLY_TOOLS:
+        return
+    scope = _scope_manager.scope
+    context = scope.context if scope else None
+    if context in (Context.PENTEST, Context.CTF):
+        return  # explicit, authorized exploitation context
+    raise PentestModeRequiredError(tool_name, context)
 
 
 class ScopeManager:
@@ -112,6 +176,30 @@ def scope_required(func: Callable) -> Callable:
         target = kwargs.get("target") or (args[0] if args else None)
         if target:
             validate_scope(target)
+        return await func(*args, **kwargs)
+
+    return wrapper
+
+
+def pentest_only(func: Callable) -> Callable:
+    """Decorator that locks a pentest-only tool unless the engagement context is
+    PENTEST or CTF. The check runs before the tool body executes — the §5 ceiling
+    is enforced *before* dispatch, never after. The function name is used as the
+    tool identifier, so it must match an entry in ``PENTEST_ONLY_TOOLS``.
+
+    Fails fast at import time if the decorated function's name is not registered
+    in ``PENTEST_ONLY_TOOLS`` — otherwise a rename would silently disable the
+    gate (``require_pentest_mode`` is a no-op for unknown names).
+    """
+    if func.__name__ not in PENTEST_ONLY_TOOLS:
+        raise ValueError(
+            f"@pentest_only applied to '{func.__name__}', which is not in "
+            "PENTEST_ONLY_TOOLS — the lock would never fire. Add it to the set."
+        )
+
+    @wraps(func)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        require_pentest_mode(func.__name__)
         return await func(*args, **kwargs)
 
     return wrapper

@@ -34,13 +34,37 @@ class TestValidateRce:
         assert chain.confidence in (Confidence.CONFIRMED, Confidence.FIRM)
         assert chain.total_weight >= 1.0
 
-    def test_expected_output_match(self) -> None:
+    def test_expected_output_single_response_capped_firm(self) -> None:
+        """I1: command output in a single response (no baseline/OOB) caps at FIRM
+        — one response can't prove the payload caused it."""
         chain = validate_rce(
             output="uid=1000(www-data) gid=1000(www-data)",
             expected_output="www-data",
         )
-        assert chain.confidence == Confidence.CONFIRMED
         assert chain.total_weight >= 2.0
+        assert chain.confidence == Confidence.FIRM
+        assert chain.is_capped
+        assert any("I1" in g for g in chain.gates)
+
+    def test_expected_output_with_differential_confirmed(self) -> None:
+        """Canary output present in payload response, absent from baseline →
+        CONFIRMED (the differential proves causality)."""
+        chain = validate_rce(
+            output="result: kc9f2a richtig uid=1000(www-data)",
+            expected_output="kc9f2a",
+            baseline_body="result: not-run",
+        )
+        assert chain.confidence == Confidence.CONFIRMED
+
+    def test_oob_hit_confirms_rce(self) -> None:
+        """A correlated OOB hit confirms blind RCE (P3)."""
+        chain = validate_rce(
+            output="",
+            payload="; nslookup canary.oast.example",
+            oob_hit=True,
+            oob_evidence="DNS canary.oast.example from 10.0.0.5",
+        )
+        assert chain.confidence == Confidence.CONFIRMED
 
     def test_time_based_detection(self) -> None:
         chain = validate_rce(
@@ -50,9 +74,24 @@ class TestValidateRce:
         )
         assert chain.total_weight >= 1.0
 
-    def test_oob_callback_detected(self) -> None:
+    def test_oob_token_in_body_does_not_confirm(self) -> None:
+        """I3: an OOB token echoed in the response body is reflection, not a
+        received callback — it must not confirm."""
         chain = validate_rce("DNS callback received from xyz.burpcollaborator.net")
-        assert chain.total_weight >= 1.0
+        assert chain.confidence == Confidence.TENTATIVE
+        assert any("I3" in fp for fp in chain.false_positive_checks)
+
+    def test_real_oob_hit_with_body_token_no_contradictory_fp(self) -> None:
+        """When oob_hit=True, a body-echoed token must NOT add a contradictory
+        'reflection only' FP check — it confirms cleanly."""
+        chain = validate_rce(
+            output="DNS callback received from xyz.burpcollaborator.net",
+            oob_hit=True,
+            oob_evidence="correlated hit on xyz.burpcollaborator.net",
+        )
+        assert chain.confidence == Confidence.CONFIRMED
+        assert not any("reflection, not a received callback" in fp
+                       for fp in chain.false_positive_checks)
 
     def test_waf_block_is_fp(self) -> None:
         chain = validate_rce("Request blocked by WAF")
@@ -72,16 +111,40 @@ class TestValidateXxe:
         chain = validate_xxe("root:x:0:0:root:/root:/bin/bash")
         assert chain.total_weight >= 1.0
 
-    def test_expected_content_match(self) -> None:
+    def test_expected_content_single_response_capped_firm(self) -> None:
+        """I1: in-band file content in a single response (no baseline) caps FIRM."""
         chain = validate_xxe(
             output="root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:",
             expected_content="root:x:0:0",
         )
+        assert chain.total_weight >= 2.0
+        assert chain.confidence == Confidence.FIRM
+        assert any("I1" in g for g in chain.gates)
+
+    def test_expected_content_with_differential_confirmed(self) -> None:
+        """File content present in payload response, absent from baseline →
+        CONFIRMED."""
+        chain = validate_xxe(
+            output="root:x:0:0:root:/root:/bin/bash",
+            expected_content="root:x:0:0",
+            baseline_body="<note>normal</note>",
+        )
         assert chain.confidence == Confidence.CONFIRMED
 
-    def test_oob_callback(self) -> None:
+    def test_oob_hit_confirms_xxe(self) -> None:
+        """A correlated OOB hit confirms blind XXE (P3)."""
+        chain = validate_xxe(
+            output="",
+            oob_hit=True,
+            oob_evidence="DNS canary.oast.example received",
+        )
+        assert chain.confidence == Confidence.CONFIRMED
+
+    def test_oob_token_in_body_does_not_confirm(self) -> None:
+        """I3: OOB token in the body is reflection, not a received callback."""
         chain = validate_xxe("Received callback from xyz.oastify.com")
-        assert chain.total_weight >= 1.0
+        assert chain.confidence == Confidence.TENTATIVE
+        assert any("I3" in fp for fp in chain.false_positive_checks)
 
     def test_ssrf_via_xxe(self) -> None:
         chain = validate_xxe("ami-id: ami-0123456789")

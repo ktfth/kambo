@@ -66,6 +66,35 @@ def responses_differ(baseline: HttpResponse, test: HttpResponse, threshold: floa
     return ratio > threshold
 
 
+def cap_single_response_reflexive(
+    chain: EvidenceChain,
+    klass: str,
+    *,
+    has_differential: bool,
+    oob_hit: bool = False,
+) -> EvidenceChain:
+    """Doctrine I1 — "causalidade ou nada".
+
+    A reflexive finding (sqli/xss/ssti/ssrf/rce/xxe/deserialization/etc.) cannot
+    reach CONFIRMED from a single response. Cap at FIRM unless one of two proofs
+    of causality is present:
+
+    * a baseline **differential** — the marker is present in the payload response
+      and absent from a structurally-similar control, or
+    * a correlated **OOB hit** (P3) for blind classes.
+
+    No-op when the chain has no positive weight, or when a differential / OOB hit
+    is already established.
+    """
+    if chain.total_weight > 0 and not has_differential and not oob_hit:
+        return chain.cap(
+            Confidence.FIRM,
+            f"Single-response {klass} evidence with no baseline differential or "
+            "correlated OOB hit — causality unproven (I1); re-test with a control",
+        )
+    return chain
+
+
 # ---------------------------------------------------------------------------
 # SQL Injection validation
 # ---------------------------------------------------------------------------
@@ -1007,21 +1036,33 @@ def validate_rce(
     baseline_body: str = "",
     response_time_ms: float = 0,
     baseline_time_ms: float = 0,
+    oob_hit: bool = False,
+    oob_evidence: str = "",
 ) -> EvidenceChain:
     """Validate Remote Code Execution / Command Injection findings.
+
+    Causality (doctrine I1/I3): direct command output reaches CONFIRMED only with
+    a baseline differential or a correlated OOB hit; otherwise it is capped at
+    FIRM. Blind RCE confirmation comes from ``oob_hit`` — a "burpcollaborator"
+    string appearing in the *response body* is reflection, not a received
+    callback, and must not confirm (I3).
 
     Args:
         output: Tool output / HTTP response body
         payload: The injection payload used
-        expected_output: Expected output from the injected command (e.g., "root")
+        expected_output: Expected output from the injected command (e.g., a canary)
         baseline_body: Response body without injection for comparison
         response_time_ms: Response time with payload
         baseline_time_ms: Response time without payload (for time-based detection)
+        oob_hit: True iff a DNS/HTTP interaction was received on the canary host
+            and correlated to this request (P3 / OAST).
+        oob_evidence: Raw OOB interaction record proving the hit.
     """
     chain = EvidenceChain()
+    has_differential = False
 
-    # FP check: empty output
-    if not output or not output.strip():
+    # FP check: empty output (unless a blind OOB hit already proved execution)
+    if (not output or not output.strip()) and not oob_hit:
         chain = chain.add_fp_check("Empty output — no command execution evidence")
         return chain
 
@@ -1036,21 +1077,30 @@ def validate_rce(
             chain = chain.add_fp_check(f"Error/block indicator detected: {pattern}")
             return chain
 
-    # FP check: payload reflected literally without execution evidence
-    if payload and payload in output:
-        has_exec_evidence = False
-        for sigs in _RCE_SIGNATURES.values():
-            for sig in sigs:
-                if re.search(sig, output, re.IGNORECASE):
-                    has_exec_evidence = True
-                    break
-            if has_exec_evidence:
-                break
+    # FP check: payload reflected literally without execution evidence.
+    # dns_oob is a body keyword (reflection), not execution evidence — exclude it
+    # so a reflected payload that merely echoes an OOB token is still a pure FP.
+    if payload and payload in output and not oob_hit:
+        has_exec_evidence = any(
+            re.search(sig, output, re.IGNORECASE)
+            for sig_type, sigs in _RCE_SIGNATURES.items()
+            if sig_type != "dns_oob"
+            for sig in sigs
+        )
         if not has_exec_evidence:
             chain = chain.add_fp_check("Payload reflected literally without execution evidence")
             return chain
 
-    # Check for expected output (strongest signal)
+    # Correlated OOB hit — the decisive proof for blind RCE (P3/I3).
+    if oob_hit:
+        chain = chain.add(
+            signal="Correlated out-of-band interaction on canary host — code executed",
+            source="oast_correlation",
+            raw_data=(oob_evidence or payload)[:1000],
+            weight=2.0,
+        )
+
+    # Check for expected output (strongest direct signal)
     if expected_output and expected_output in output:
         chain = chain.add(
             signal=f"Expected command output found: {expected_output[:100]}",
@@ -1058,20 +1108,42 @@ def validate_rce(
             raw_data=output[:500],
             weight=2.0,
         )
+        # A differential exists when the canary output is absent from a baseline.
+        if baseline_body and expected_output not in baseline_body:
+            has_differential = True
 
-    # Check for OS identity signatures
+    # Check for OS identity / system signatures.
     for sig_type, patterns in _RCE_SIGNATURES.items():
+        # I3: an OOB token in the *body* is reflection, not a received callback —
+        # it cannot confirm. When a real oob_hit is already established, skip it
+        # entirely (no contradictory annotation); otherwise record it as a weak,
+        # non-confirming signal.
+        if sig_type == "dns_oob":
+            if oob_hit:
+                continue
+            if any(re.search(p, output, re.IGNORECASE) for p in patterns):
+                chain = chain.add(
+                    signal="OOB token echoed in response body — not a correlated hit",
+                    source="rce_signature_analysis",
+                    raw_data=_extract_context(output, patterns[0]),
+                    weight=0.3,
+                )
+                chain = chain.add_fp_check(
+                    "OOB token in body is reflection, not a received callback — "
+                    "poll the collaborator and pass oob_hit=True to confirm (I3)"
+                )
+            continue
         for pattern in patterns:
             if re.search(pattern, output, re.IGNORECASE):
                 chain = chain.add(
                     signal=f"RCE signature matched: {sig_type}",
                     source="rce_signature_analysis",
                     raw_data=_extract_context(output, pattern),
-                    weight=1.5 if sig_type in ("os_identity", "dns_oob") else 0.8,
+                    weight=1.5 if sig_type == "os_identity" else 0.8,
                 )
                 break  # one match per type
 
-    # Time-based detection
+    # Time-based detection — inherently differential (payload time vs baseline).
     if response_time_ms > 0 and baseline_time_ms > 0:
         delay = response_time_ms - baseline_time_ms
         if delay > 4500:  # > 4.5s delay (typical sleep(5) injection)
@@ -1080,6 +1152,7 @@ def validate_rce(
                 source="rce_time_analysis",
                 weight=1.0,
             )
+            has_differential = True
 
     # Baseline comparison
     if baseline_body and output.strip() != baseline_body.strip():
@@ -1090,7 +1163,9 @@ def validate_rce(
                 weight=0.3,
             )
 
-    return chain
+    return cap_single_response_reflexive(
+        chain, "RCE", has_differential=has_differential, oob_hit=oob_hit
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1124,19 +1199,29 @@ def validate_xxe(
     payload: str = "",
     expected_content: str = "",
     baseline_body: str = "",
+    oob_hit: bool = False,
+    oob_evidence: str = "",
 ) -> EvidenceChain:
     """Validate XML External Entity Injection findings.
+
+    Causality (doctrine I1/I3): in-band file exfiltration reaches CONFIRMED only
+    with a baseline differential; blind XXE confirmation comes from a correlated
+    ``oob_hit``. An OOB token echoed in the response body is reflection, not a
+    received callback, and must not confirm (I3).
 
     Args:
         output: Response body or tool output
         payload: The XXE payload used
-        expected_content: Expected file content (e.g., "root:x:0:0")
+        expected_content: Expected file content (e.g., a canary or "root:x:0:0")
         baseline_body: Normal response without XXE for comparison
+        oob_hit: True iff an OOB interaction was received and correlated (P3).
+        oob_evidence: Raw OOB interaction record proving the hit.
     """
     chain = EvidenceChain()
+    has_differential = False
 
-    # FP check: empty output
-    if not output or not output.strip():
+    # FP check: empty output (unless a blind OOB hit already proved resolution)
+    if (not output or not output.strip()) and not oob_hit:
         chain = chain.add_fp_check("Empty output — no XXE evidence")
         return chain
 
@@ -1156,7 +1241,16 @@ def validate_xxe(
             chain = chain.add_fp_check("Generic error without XXE-specific content")
             return chain
 
-    # Check for expected content (strongest signal)
+    # Correlated OOB hit — the decisive proof for blind XXE (P3/I3).
+    if oob_hit:
+        chain = chain.add(
+            signal="Correlated out-of-band interaction on canary host — entity resolved externally",
+            source="oast_correlation",
+            raw_data=(oob_evidence or payload)[:1000],
+            weight=2.0,
+        )
+
+    # Check for expected content (strongest in-band signal)
     if expected_content and expected_content in output:
         chain = chain.add(
             signal=f"Expected entity content found: {expected_content[:100]}",
@@ -1164,12 +1258,32 @@ def validate_xxe(
             raw_data=output[:500],
             weight=2.0,
         )
+        if baseline_body and expected_content not in baseline_body:
+            has_differential = True
 
     # Check for XXE signatures
     for sig_type, patterns in _XXE_SIGNATURES.items():
+        # I3: an OOB token in the body is reflection, not a received callback —
+        # only a real oob_hit confirms. Skip entirely when oob_hit is set (no
+        # contradictory annotation); otherwise record it as a non-confirming signal.
+        if sig_type == "oob_callback":
+            if oob_hit:
+                continue
+            if any(re.search(p, output, re.IGNORECASE) for p in patterns):
+                chain = chain.add(
+                    signal="OOB token echoed in response body — not a correlated hit",
+                    source="xxe_signature_analysis",
+                    raw_data=_extract_context(output, patterns[0]),
+                    weight=0.3,
+                )
+                chain = chain.add_fp_check(
+                    "OOB token in body is reflection, not a received callback — "
+                    "poll the collaborator and pass oob_hit=True to confirm (I3)"
+                )
+            continue
         for pattern in patterns:
             if re.search(pattern, output, re.IGNORECASE):
-                weight = 1.5 if sig_type in ("file_content", "oob_callback") else 0.8
+                weight = 1.5 if sig_type == "file_content" else 0.8
                 chain = chain.add(
                     signal=f"XXE signature: {sig_type}",
                     source="xxe_signature_analysis",
@@ -1187,7 +1301,9 @@ def validate_xxe(
                 weight=0.3,
             )
 
-    return chain
+    return cap_single_response_reflexive(
+        chain, "XXE", has_differential=has_differential, oob_hit=oob_hit
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1573,6 +1689,7 @@ def validate_prototype_pollution(
         baseline_body: Normal response for comparison
     """
     chain = EvidenceChain()
+    has_differential = False
 
     if not output or not output.strip():
         return chain.add_fp_check("Empty output — no prototype pollution evidence")
@@ -1609,7 +1726,7 @@ def validate_prototype_pollution(
             )
             break
 
-    # Baseline comparison
+    # Baseline comparison — the differential proof of causality.
     if baseline_body and output.strip() != baseline_body.strip():
         if injected_value and injected_value in output and injected_value not in baseline_body:
             chain = chain.add(
@@ -1617,8 +1734,11 @@ def validate_prototype_pollution(
                 source="prototype_pollution_baseline",
                 weight=0.5,
             )
+            has_differential = True
 
-    return chain
+    return cap_single_response_reflexive(
+        chain, "prototype pollution", has_differential=has_differential
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1638,8 +1758,11 @@ _DESER_CONFIRMED_SIGNALS: list[tuple[str, str, float]] = [
     (r"java\.io\.NotSerializableException", "Java serialization error — endpoint processes Java objects", 0.8),
     (r"php.*unserialize.*error|__wakeup.*called", "PHP deserialization hook triggered", 1.0),
     (r"pickle.*protocol|_reduce_|__reduce__", "Python pickle deserialization signal", 1.5),
-    (r"(dns.*callback|oob.*callback|burpcollaborator|interactsh)", "OOB callback via deserialization", 1.5),
 ]
+
+# OOB token in the body is reflection, not a received callback (I3) — handled
+# separately from the confirming signals above.
+_DESER_OOB_BODY_PATTERN = r"(dns.*callback|oob.*callback|burpcollaborator|interactsh)"
 
 
 def validate_deserialization(
@@ -1648,28 +1771,46 @@ def validate_deserialization(
     expected_output: str = "",
     response_time_ms: float = 0,
     baseline_time_ms: float = 0,
+    oob_hit: bool = False,
+    oob_evidence: str = "",
 ) -> EvidenceChain:
     """Validate Insecure Deserialization findings.
 
     Detects Java (ysoserial), PHP (unserialize), and Python (pickle)
     deserialization vulnerabilities.
 
+    Causality (doctrine I1/I3): single-response evidence is capped at FIRM unless
+    a time-based differential or a correlated ``oob_hit`` proves the gadget ran.
+    An OOB token in the response body is reflection, not a received callback (I3).
+
     Args:
         output: Response body or error output
         payload_type: Type of payload used — java, php, python
-        expected_output: Expected command output for RCE-based detection
+        expected_output: Expected command output for RCE-based detection (a canary)
         response_time_ms: Response time with sleep payload (for time-based detection)
         baseline_time_ms: Baseline response time
+        oob_hit: True iff an OOB interaction was received and correlated (P3).
+        oob_evidence: Raw OOB interaction record proving the hit.
     """
     chain = EvidenceChain()
+    has_differential = False
 
-    if not output and response_time_ms == 0:
+    if not output and response_time_ms == 0 and not oob_hit:
         return chain.add_fp_check("No output and no timing data — cannot assess")
 
     # FP check: explicitly rejected
     for pattern in _DESER_FP_PATTERNS:
         if re.search(pattern, output, re.IGNORECASE):
             return chain.add_fp_check(f"Deserialization explicitly rejected: {pattern}")
+
+    # Correlated OOB hit — decisive for blind deserialization (P3/I3).
+    if oob_hit:
+        chain = chain.add(
+            signal="Correlated out-of-band interaction on canary host — gadget executed",
+            source="oast_correlation",
+            raw_data=(oob_evidence or expected_output)[:1000],
+            weight=2.0,
+        )
 
     # Primary signal: expected command output (RCE confirmation)
     if expected_output and expected_output in output:
@@ -1691,7 +1832,21 @@ def validate_deserialization(
             )
             break  # one strong signal is enough
 
-    # Time-based detection (sleep payload)
+    # I3: OOB token echoed in the body — reflection only, cannot confirm. Skipped
+    # when a real oob_hit is already established (no contradictory annotation).
+    if not oob_hit and re.search(_DESER_OOB_BODY_PATTERN, output, re.IGNORECASE):
+        chain = chain.add(
+            signal="OOB token echoed in response body — not a correlated hit",
+            source="deserialization_signature",
+            raw_data=_extract_context(output, _DESER_OOB_BODY_PATTERN),
+            weight=0.3,
+        )
+        chain = chain.add_fp_check(
+            "OOB token in body is reflection, not a received callback — "
+            "poll the collaborator and pass oob_hit=True to confirm (I3)"
+        )
+
+    # Time-based detection (sleep payload) — inherently differential.
     if response_time_ms > 0 and baseline_time_ms > 0:
         delay = response_time_ms - baseline_time_ms
         if delay > 5000:  # 5+ second delay
@@ -1700,8 +1855,11 @@ def validate_deserialization(
                 source="deserialization_time_based",
                 weight=1.5 if delay > 8000 else 1.0,
             )
+            has_differential = True
 
-    return chain
+    return cap_single_response_reflexive(
+        chain, "deserialization", has_differential=has_differential, oob_hit=oob_hit
+    )
 
 
 # ---------------------------------------------------------------------------

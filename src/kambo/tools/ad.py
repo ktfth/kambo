@@ -4,9 +4,10 @@ from __future__ import annotations
 
 from kambo.docker_runner import get_runner
 from kambo.models import Phase
-from kambo.scope import validate_scope
+from kambo.scope import pentest_only, validate_scope
 
 
+@pentest_only
 async def ad_bloodhound(
     target: str,
     domain: str,
@@ -38,6 +39,7 @@ async def ad_bloodhound(
     }
 
 
+@pentest_only
 async def ad_kerberoast(
     target: str,
     domain: str,
@@ -69,6 +71,7 @@ async def ad_kerberoast(
     }
 
 
+@pentest_only
 async def ad_asrep_roast(
     target: str,
     domain: str,
@@ -108,6 +111,7 @@ async def ad_asrep_roast(
     }
 
 
+@pentest_only
 async def ad_pass_the_hash(
     target: str,
     username: str,
@@ -140,6 +144,7 @@ async def ad_pass_the_hash(
     }
 
 
+@pentest_only
 async def ad_dcsync(
     target: str,
     domain: str,
@@ -178,6 +183,7 @@ async def ad_dcsync(
     }
 
 
+@pentest_only
 async def ad_certify(
     target: str,
     domain: str,
@@ -209,6 +215,7 @@ async def ad_certify(
     }
 
 
+@pentest_only
 async def ad_ntlm_relay(
     target: str,
     relay_target: str = "",
