@@ -42,7 +42,7 @@ _VULN_ACCEPTANCE_RATES: dict[str, float] = {
     # --- Evidence-backed (have validate_*) ---
     # High acceptance — clear impact, easy to verify
     "sqli": 0.95,
-    "rce": 0.98,
+    "rce": 0.97,
     "ssrf": 0.90,
     "idor": 0.88,
     "bola": 0.88,
@@ -54,6 +54,8 @@ _VULN_ACCEPTANCE_RATES: dict[str, float] = {
     "xxe": 0.83,
     "insecure_deserialization": 0.85,
     "prototype_pollution": 0.80,
+    "graphql": 0.80,
+    "race_condition": 0.82,
 
     # Medium acceptance — sometimes disputed or downgraded
     "xss": 0.75,
@@ -71,7 +73,7 @@ _VULN_ACCEPTANCE_RATES: dict[str, float] = {
 
     # Low acceptance — often marked informational or duplicate
     "rate_limiting": 0.10,
-    "missing_headers": 0.05,
+    "missing_headers": 0.06,
     "version_disclosure": 0.15,
 }
 

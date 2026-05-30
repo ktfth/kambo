@@ -1698,6 +1698,10 @@ def validate_prototype_pollution(
     if re.search(r"(invalid json|json parse|unexpected token|malformed)", output, re.IGNORECASE):
         return chain.add_fp_check("Server rejected input as malformed JSON — not polluted")
 
+    # FP check: WAF/security layer blocked the payload before it reached app logic
+    if re.search(r"(waf|firewall|blocked|forbidden|access denied|security violation)", output, re.IGNORECASE):
+        return chain.add_fp_check("Request blocked by WAF/security layer — payload never reached application")
+
     # Primary signal: injected value appears in unexpected response field
     if injected_value and injected_value in output:
         # Check it's not just reflected in an error
@@ -2032,11 +2036,13 @@ def validate_race_condition(
 
     # Primary signal: more successes than expected
     extra_successes = len(success_responses) - expected_unique
+    success_previews = "; ".join(r[2][:80] for r in success_responses[:3])
     if extra_successes > 0:
         chain = chain.add(
             signal=f"Race condition: {len(success_responses)}/{total} requests succeeded "
                    f"(expected max {expected_unique}){' for: ' + action if action else ''}",
             source="race_condition_analysis",
+            raw_data=success_previews,
             weight=1.0 + min(1.0, extra_successes * 0.2),  # more extras = stronger signal
         )
 
@@ -2047,12 +2053,14 @@ def validate_race_condition(
         chain = chain.add(
             signal=f"All {len(success_responses)} success responses are identical — same state applied multiple times",
             source="race_condition_identity_check",
+            raw_data=success_previews,
             weight=0.8,
         )
     elif len(unique_hashes) > 1:
         chain = chain.add(
             signal=f"Varied responses across {len(success_responses)} successes — concurrent state mutation confirmed",
             source="race_condition_variance_check",
+            raw_data=success_previews,
             weight=0.5,
         )
 
@@ -2061,6 +2069,7 @@ def validate_race_condition(
         chain = chain.add(
             signal=f"Parallel requests produced {len(success_responses)} successes vs baseline {baseline_count}",
             source="race_condition_baseline",
+            raw_data=success_previews,
             weight=0.5,
         )
 
