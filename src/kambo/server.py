@@ -61,7 +61,7 @@ _TOOL_REGISTRY: dict[str, _ToolEntry] = {
     # ── vuln ──────────────────────────────────────────────────────────────
     "vuln_ssti": _ToolEntry(
         tool=Tool(name="vuln_ssti",
-                  description="Server-Side Template Injection detection — tests {{7*7}}→49 across Jinja2, Twig, Freemarker, Velocity, ERB",
+                  description="Server-Side Template Injection detection — orthogonal arithmetic canary {{31337*1337}}→41897569 across Jinja2, Twig, Freemarker, Velocity, ERB",
                   inputSchema={
                       "type": "object",
                       "properties": {

@@ -18,7 +18,7 @@ All tools run inside a Docker container. Evidence chains grade findings as CONFI
 
 ## Conventions
 
-- Python 3.14, async/await everywhere
+- Python 3.11+ (CI tests 3.11–3.14), async/await everywhere
 - Pydantic models with `frozen=True` for immutability
 - Evidence chains: weighted signals accumulate to confidence levels
 - Metrics tracked per-tool across sessions via SQLite

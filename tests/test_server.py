@@ -42,6 +42,51 @@ class TestDispatchToolRouting:
         assert "Unknown tool" in result["error"]
 
 
+class TestToolDispatchConsistency:
+    """Guard against dual-dispatch drift between list_tools() and _dispatch_tool().
+
+    The two halves (schema in list_tools(), routing in _dispatch_tool()/registry)
+    must stay in lockstep: every advertised tool must be dispatchable, and every
+    dispatch handler must be advertised. Static check — no tool execution.
+    """
+
+    def _handled_names(self) -> set[str]:
+        import inspect
+        import re
+
+        from kambo import server
+
+        # _dispatch_tool body only (ends at the "Unknown tool" sentinel) — keeps
+        # prompt handlers and resource routing out of the comparison.
+        disp_src = inspect.getsource(server._dispatch_tool)
+        if_names = set(re.findall(r'if name == "([^"]+)"', disp_src))
+        return set(server._TOOL_REGISTRY) | if_names
+
+    @pytest.mark.asyncio
+    async def test_every_listed_tool_has_a_handler(self) -> None:
+        from kambo.server import list_tools
+
+        listed = {t.name for t in await list_tools()}
+        missing = listed - self._handled_names()
+        assert not missing, f"Advertised but not dispatchable: {sorted(missing)}"
+
+    @pytest.mark.asyncio
+    async def test_every_handler_is_listed(self) -> None:
+        from kambo.server import list_tools
+
+        listed = {t.name for t in await list_tools()}
+        orphan = self._handled_names() - listed
+        assert not orphan, f"Dispatchable but not advertised: {sorted(orphan)}"
+
+    @pytest.mark.asyncio
+    async def test_no_duplicate_tool_names(self) -> None:
+        from kambo.server import list_tools
+
+        names = [t.name for t in await list_tools()]
+        dupes = sorted({n for n in names if names.count(n) > 1})
+        assert not dupes, f"Duplicate tool names advertised: {dupes}"
+
+
 class TestCallToolMetrics:
     """Verify call_tool injects FP warnings and flushes metrics."""
 
