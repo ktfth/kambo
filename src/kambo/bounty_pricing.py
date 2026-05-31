@@ -53,7 +53,10 @@ _VULN_ACCEPTANCE_RATES: dict[str, float] = {
     "path_traversal": 0.82,
     "xxe": 0.83,
     "insecure_deserialization": 0.85,
+    "deserialization": 0.85,  # alias for validate_deserialization() key
     "prototype_pollution": 0.80,
+    "race_condition": 0.82,
+    "graphql": 0.75,
 
     # Medium acceptance — sometimes disputed or downgraded
     "xss": 0.75,

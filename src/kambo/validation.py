@@ -1698,6 +1698,11 @@ def validate_prototype_pollution(
     if re.search(r"(invalid json|json parse|unexpected token|malformed)", output, re.IGNORECASE):
         return chain.add_fp_check("Server rejected input as malformed JSON — not polluted")
 
+    # FP check: generic server error with no pollution indicators
+    if re.search(r"(internal server error|500 error|unhandled exception)", output, re.IGNORECASE):
+        if not re.search(r"(__proto__|prototype|constructor)", output, re.IGNORECASE):
+            return chain.add_fp_check("Generic server error with no pollution indicators — likely unrelated crash")
+
     # Primary signal: injected value appears in unexpected response field
     if injected_value and injected_value in output:
         # Check it's not just reflected in an error
@@ -2033,10 +2038,12 @@ def validate_race_condition(
     # Primary signal: more successes than expected
     extra_successes = len(success_responses) - expected_unique
     if extra_successes > 0:
+        previews = " | ".join(r[2][:80] for r in success_responses[:3])
         chain = chain.add(
             signal=f"Race condition: {len(success_responses)}/{total} requests succeeded "
                    f"(expected max {expected_unique}){' for: ' + action if action else ''}",
             source="race_condition_analysis",
+            raw_data=previews,
             weight=1.0 + min(1.0, extra_successes * 0.2),  # more extras = stronger signal
         )
 
@@ -2047,12 +2054,15 @@ def validate_race_condition(
         chain = chain.add(
             signal=f"All {len(success_responses)} success responses are identical — same state applied multiple times",
             source="race_condition_identity_check",
+            raw_data=success_responses[0][2][:120] if success_responses else "",
             weight=0.8,
         )
     elif len(unique_hashes) > 1:
+        sample = " | ".join(r[2][:60] for r in success_responses[:2])
         chain = chain.add(
             signal=f"Varied responses across {len(success_responses)} successes — concurrent state mutation confirmed",
             source="race_condition_variance_check",
+            raw_data=sample,
             weight=0.5,
         )
 
@@ -2061,6 +2071,7 @@ def validate_race_condition(
         chain = chain.add(
             signal=f"Parallel requests produced {len(success_responses)} successes vs baseline {baseline_count}",
             source="race_condition_baseline",
+            raw_data=f"baseline={baseline_count} actual={len(success_responses)}",
             weight=0.5,
         )
 
