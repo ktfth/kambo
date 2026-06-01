@@ -1,0 +1,9 @@
+[Unit]
+Description=Kambo Social — executa todo dia às 18h
+
+[Timer]
+OnCalendar=*-*-* 18:00:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

@@ -1,0 +1,10 @@
+[Unit]
+Description=Kambo Social Media — Post do dia
+After=network.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/kambo/social-media
+ExecStart=/bin/bash %h/kambo/social-media/schedule.sh today
+StandardOutput=append:%h/kambo/social-media/post-log.txt
+StandardError=append:%h/kambo/social-media/post-log.txt
