@@ -210,6 +210,10 @@ _WAF_SIGNATURES = [
     "wordfence",
 ]
 
+_CSP_NONCE_HASH_RE = re.compile(
+    r"script-src[^;]*(?:nonce-|sha256-|sha384-|sha512-)", re.IGNORECASE
+)
+
 
 def validate_xss(
     raw_output: str,
@@ -247,6 +251,22 @@ def validate_xss(
             "curl-only — browser execution unproven",
         )
         chain = chain.add_flag("needs-browser-verification")
+
+    # I5 gate: CSP with nonce/hash blocks injected inline scripts even if
+    # the payload reflects unencoded. Cap at TENTATIVE — the XSS payload
+    # cannot execute without a valid nonce.
+    csp_header = response_headers.lower() if response_headers else ""
+    csp_nonce_detected = bool(_CSP_NONCE_HASH_RE.search(csp_header))
+    if csp_nonce_detected:
+        chain = chain.add_fp_check(
+            "CSP script-src with nonce/hash detected — inline script "
+            "injection blocked by browser even if payload reflects"
+        )
+        chain = chain.cap(
+            Confidence.TENTATIVE,
+            "CSP nonce/hash in script-src prevents inline execution — "
+            "reflected XSS not exploitable without nonce bypass (I5)",
+        )
 
     # Detect SPA frameworks — they auto-escape by default
     spa_detected = [m for m in _SPA_FRAMEWORK_MARKERS if m in raw_output]
@@ -345,10 +365,13 @@ def validate_xss(
             "vuln until reflected in an executable context (I4)",
         )
     elif in_script:
+        script_weight = 0.7
+        if waf_detected or spa_detected:
+            script_weight = 0.4
         chain = chain.add(
             signal="Reflection occurs inside <script> block — high XSS probability",
             source="context_analysis",
-            weight=0.7 if not waf_detected else 0.4,
+            weight=script_weight,
         )
     elif in_comment:
         # I4 gate: an HTML comment is not an executable context.
@@ -419,6 +442,23 @@ def validate_cors(
         raw_data=response_headers[:500],
         weight=0.5,
     )
+
+    # Same-org subdomain filter: if the reflected origin is a subdomain of the
+    # target's root domain, the organisation controls all subdomains and this
+    # is almost certainly by-design trust, not a misconfiguration.
+    target_root = ".".join(target_domain.rsplit(".", 2)[-2:]).lower()
+    origin_host = origin_tested.lower().replace("https://", "").replace("http://", "")
+    if origin_host.endswith(f".{target_root}") and origin_host != target_root:
+        chain = chain.add_fp_check(
+            f"Reflected origin {origin_tested} is a subdomain of target root "
+            f"({target_root}) — same-org trust, likely by-design"
+        )
+        chain = chain.cap(
+            Confidence.TENTATIVE,
+            f"Same-org subdomain reflection ({target_root}) — organisation "
+            "controls all subdomains, not exploitable by external attacker",
+        )
+        return chain
 
     # Check for credentials — this is what makes it exploitable
     if "access-control-allow-credentials: true" in headers_lower:

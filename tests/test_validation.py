@@ -444,3 +444,105 @@ class TestPathTraversal:
         body = "Warning: include(../../etc/passwd) failed to open stream: No such file or directory"
         chain = validate_path_traversal(body, "../../etc/passwd")
         assert chain.total_weight > 0  # error = path processed
+
+
+# ---------------------------------------------------------------------------
+# CSP nonce gate (I5) — XSS capped when CSP nonce present
+# ---------------------------------------------------------------------------
+
+class TestXssCspNonceGate:
+    def test_csp_nonce_caps_at_tentative(self) -> None:
+        """I5: CSP with nonce in script-src prevents inline execution."""
+        payload = "<script>alert(1)</script>"
+        response = f"<html><body>{payload}</body></html>"
+        headers = (
+            "HTTP/2 200\r\n"
+            "Content-Security-Policy: default-src 'self'; "
+            "script-src 'nonce-abc123def' 'strict-dynamic'"
+        )
+        chain = validate_xss(response, payload, "q", response_headers=headers)
+        assert chain.confidence == Confidence.TENTATIVE
+        assert chain.is_capped
+        assert any("I5" in g for g in chain.gates)
+
+    def test_csp_sha256_caps_at_tentative(self) -> None:
+        """I5: CSP with sha256 hash also blocks injected scripts."""
+        payload = "'-alert(1)-'"
+        response = f"<html><script>var x = '{payload}';</script></html>"
+        headers = (
+            "HTTP/2 200\r\n"
+            "Content-Security-Policy: script-src 'sha256-abcdef123456'"
+        )
+        chain = validate_xss(response, payload, "q", response_headers=headers)
+        assert chain.confidence == Confidence.TENTATIVE
+        assert any("CSP" in fp for fp in chain.false_positive_checks)
+
+    def test_no_csp_allows_higher_confidence(self) -> None:
+        """Without CSP nonce, in-script reflection should reach FIRM."""
+        payload = "'-alert(1)-'"
+        response = f"<html><script>var x = '{payload}';</script></html>"
+        chain = validate_xss(response, payload, "q")
+        assert chain.confidence >= Confidence.FIRM
+
+    def test_csp_without_nonce_no_cap(self) -> None:
+        """CSP without nonce/hash (e.g. unsafe-inline) does not trigger I5."""
+        payload = "<script>alert(1)</script>"
+        response = f"<html><body>{payload}</body></html>"
+        headers = (
+            "HTTP/2 200\r\n"
+            "Content-Security-Policy: script-src 'self' 'unsafe-inline'"
+        )
+        chain = validate_xss(response, payload, "q", response_headers=headers)
+        assert not chain.is_capped
+
+
+# ---------------------------------------------------------------------------
+# SPA + script context weight reduction
+# ---------------------------------------------------------------------------
+
+class TestXssSpaScriptContext:
+    def test_spa_reduces_script_context_weight(self) -> None:
+        """SPA framework should reduce script context weight like WAF does."""
+        payload = "'-alert(1)-'"
+        response_spa = (
+            '<html><head><script id="__NEXT_DATA__">{}</script></head>'
+            f"<script>var x = '{payload}';</script></html>"
+        )
+        response_plain = f"<html><script>var x = '{payload}';</script></html>"
+        chain_spa = validate_xss(response_spa, payload, "q")
+        chain_plain = validate_xss(response_plain, payload, "q")
+        assert chain_spa.total_weight < chain_plain.total_weight
+
+
+# ---------------------------------------------------------------------------
+# CORS same-org subdomain filter
+# ---------------------------------------------------------------------------
+
+class TestCorsSameOrgSubdomain:
+    def test_same_org_subdomain_caps_tentative(self) -> None:
+        """Reflected origin that is a subdomain of target root is by-design."""
+        headers = (
+            "HTTP/1.1 200 OK\r\n"
+            "Access-Control-Allow-Origin: https://evil-graphql.instagram.com\r\n"
+            "Access-Control-Allow-Credentials: true"
+        )
+        chain = validate_cors(
+            "https://evil-graphql.instagram.com",
+            headers,
+            "graphql.instagram.com",
+        )
+        assert chain.confidence == Confidence.TENTATIVE
+        assert chain.ceiling == Confidence.TENTATIVE
+        assert any("same-org" in fp.lower() for fp in chain.false_positive_checks)
+        assert any("same-org" in g.lower() for g in chain.gates)
+
+    def test_external_origin_not_capped(self) -> None:
+        """Truly external origin should NOT be capped by same-org filter."""
+        headers = (
+            "HTTP/1.1 200 OK\r\n"
+            "Access-Control-Allow-Origin: https://evil.com\r\n"
+            "Access-Control-Allow-Credentials: true"
+        )
+        chain = validate_cors("https://evil.com", headers, "example.com")
+        assert chain.confidence >= Confidence.FIRM
+        assert not any("same-org" in fp.lower() for fp in chain.false_positive_checks)
