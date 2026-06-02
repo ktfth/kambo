@@ -28,7 +28,7 @@ def analyze_tool_performance(tracker: MetricsTracker | None = None) -> list[dict
     insights: list[dict[str, Any]] = []
 
     for name, m in tracker.tools.items():
-        if m.total_runs < 2:
+        if m.total_runs < 3:
             continue
 
         total_reviewed = m.user_confirmed + m.user_rejected
