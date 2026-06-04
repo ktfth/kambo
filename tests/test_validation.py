@@ -404,6 +404,68 @@ class TestSubdomainTakeoverValidation:
         assert chain.total_weight > 0
         assert chain.total_weight < 1.0  # dangling but no fingerprint
 
+    def test_dangling_cname_non_claimable_elb(self) -> None:
+        # AWS ELB DNS names are account-bound + hash-named: a dangling CNAME to one
+        # is DNS hygiene, NOT a registerable takeover. Must accrue no takeover weight.
+        chain = validate_subdomain_takeover(
+            "internal-eapp-test-demo-lb-157125248.us-gov-west-1.elb.amazonaws.com.",
+            False,
+        )
+        assert chain.total_weight == 0.0
+        assert chain.confidence_pct == 0
+        assert chain.confidence == Confidence.TENTATIVE
+        assert any("non-claimable" in c.lower() for c in chain.false_positive_checks)
+        assert any("elb" in c.lower() for c in chain.false_positive_checks)
+
+    def test_dangling_cname_non_claimable_alb_elb_before_region(self) -> None:
+        # The other ELB DNS ordering: name.elb.<region>.amazonaws.com (vs the
+        # *.<region>.elb.amazonaws.com form in the test above). Both must match.
+        chain = validate_subdomain_takeover(
+            "myalb-987654321.elb.us-gov-west-1.amazonaws.com.", False
+        )
+        assert chain.total_weight == 0.0
+        assert any("non-claimable" in c.lower() for c in chain.false_positive_checks)
+
+    def test_dangling_cname_non_claimable_rds(self) -> None:
+        chain = validate_subdomain_takeover(
+            "mydb.cluster-abc123.us-east-1.rds.amazonaws.com.", False
+        )
+        assert chain.total_weight == 0.0
+        assert any("rds" in c.lower() for c in chain.false_positive_checks)
+
+    def test_dangling_cname_non_claimable_api_gateway(self) -> None:
+        # API Gateway invoke URLs carry an account-bound auto-generated API id.
+        chain = validate_subdomain_takeover(
+            "abc123xyz.execute-api.us-east-1.amazonaws.com.", False
+        )
+        assert chain.total_weight == 0.0
+        assert any("non-claimable" in c.lower() for c in chain.false_positive_checks)
+
+    def test_dangling_cname_non_claimable_lambda_url(self) -> None:
+        # Lambda Function URLs are account-bound and live under on.aws (no amazonaws.com).
+        chain = validate_subdomain_takeover(
+            "abcdef1234567890.lambda-url.us-east-1.on.aws.", False
+        )
+        assert chain.total_weight == 0.0
+        assert any("lambda" in c.lower() for c in chain.false_positive_checks)
+
+    def test_dangling_claimable_s3_not_suppressed(self) -> None:
+        # S3 IS claimable even though it is AWS — must NOT be treated as non-claimable.
+        chain = validate_subdomain_takeover(
+            "oldbucket.s3.amazonaws.com.", False, "NoSuchBucket"
+        )
+        assert chain.total_weight >= 1.5  # dangling + fingerprint + claimable service
+
+    def test_dangling_non_claimable_with_real_fingerprint_not_suppressed(self) -> None:
+        # Defensive: a genuine takeover fingerprint in the body still wins over the
+        # non-claimable suppression (keeps any real signal).
+        chain = validate_subdomain_takeover(
+            "x.us-gov-west-1.elb.amazonaws.com.",
+            False,
+            "There isn't a GitHub Pages site here.",
+        )
+        assert chain.total_weight > 0.0
+
 
 class TestPathTraversal:
     def test_etc_passwd_detected(self) -> None:

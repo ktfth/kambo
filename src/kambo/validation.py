@@ -871,6 +871,42 @@ _TAKEOVER_FINGERPRINTS: dict[str, list[str]] = {
 }
 
 
+def _non_claimable_resource(cname: str) -> str | None:
+    """Return the resource type if a dangling CNAME target is **non-claimable**.
+
+    Some cloud resources publish DNS names that are account-bound and contain an
+    auto-generated identifier (e.g. an AWS ELB/NLB, RDS, or ElastiCache endpoint).
+    Even when such a name stops resolving, an attacker **cannot** re-register it —
+    you can't create an ELB with someone else's generated hostname. A dangling
+    CNAME to one of these is a DNS-hygiene issue (orphaned record), not a
+    registerable subdomain takeover, so it must not accrue takeover confidence.
+
+    Returns ``None`` for claimable targets (S3 buckets, CloudFront distributions,
+    SaaS sites, …) so the normal takeover signals still apply.
+    """
+    c = cname.lower().rstrip(".")
+    # Account-bound names that do not live under amazonaws.com:
+    if ".lambda-url." in c and ".on.aws" in c:
+        return "AWS Lambda Function URL"
+    if "amazonaws.com" not in c:
+        return None
+    if ".elb." in c:  # covers both *.elb.<region>.amazonaws.com and *.<region>.elb.amazonaws.com
+        return "AWS ELB/NLB"
+    if ".execute-api." in c:
+        return "AWS API Gateway endpoint"
+    if ".rds.amazonaws.com" in c:
+        return "AWS RDS endpoint"
+    if ".cache.amazonaws.com" in c:
+        return "AWS ElastiCache endpoint"
+    if ".es.amazonaws.com" in c or ".aoss.amazonaws.com" in c:
+        return "AWS OpenSearch endpoint"
+    if ".compute.amazonaws.com" in c or ".compute-1.amazonaws.com" in c:
+        return "AWS EC2 instance"
+    if ".vpce.amazonaws.com" in c:
+        return "AWS VPC endpoint"
+    return None
+
+
 def validate_subdomain_takeover(
     cname: str,
     cname_resolves: bool,
@@ -900,6 +936,23 @@ def validate_subdomain_takeover(
                         weight=0.5,
                     )
         return chain
+
+    # FP check: a dangling CNAME to a non-claimable target (AWS ELB/NLB, RDS, …)
+    # is a DNS-hygiene issue, not a registerable takeover. Record the orphaned
+    # record but accrue no takeover weight, unless a real service fingerprint is
+    # present in the body (defensive — keeps any genuine signal).
+    non_claimable = _non_claimable_resource(cname)
+    if non_claimable:
+        body = response_body.lower()
+        has_fingerprint = any(
+            fp in body for fps in _TAKEOVER_FINGERPRINTS.values() for fp in fps
+        )
+        if not has_fingerprint:
+            return chain.add_fp_check(
+                f"Dangling CNAME: {cname} does not resolve — target is a "
+                f"non-claimable {non_claimable} (account-bound, auto-generated "
+                "DNS name) — DNS-hygiene issue, not a registerable subdomain takeover"
+            )
 
     # Dangling CNAME
     chain = chain.add(
