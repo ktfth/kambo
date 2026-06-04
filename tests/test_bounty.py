@@ -156,3 +156,62 @@ class TestReportConfirmFinding:
             result = await report_confirm_finding("FIND-999", is_true_positive=True)
 
         assert "error" in result
+
+    @pytest.mark.asyncio
+    async def test_feedback_with_json_string_tools_used(self) -> None:
+        """tools_used arriving as a JSON STRING (raw DB row) must not be iterated
+        character by character — regression for metrics corrupted into '[' / ']'."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from kambo.tools.reporting import report_confirm_finding
+
+        mock_db = AsyncMock()
+        mock_db.get_findings.return_value = [
+            {"id": "FIND-010", "tools_used": '["vuln_xss"]', "severity": "high"}
+        ]
+        mock_metrics = MagicMock()
+
+        with patch("kambo.tools.reporting.get_database", return_value=mock_db), \
+             patch("kambo.tools.reporting.get_metrics", return_value=mock_metrics):
+            await report_confirm_finding("FIND-010", is_true_positive=True)
+
+        recorded = [c.args[0] for c in mock_metrics.record_user_feedback.call_args_list]
+        assert recorded == ["vuln_xss"]
+        assert "[" not in recorded and "]" not in recorded
+
+    @pytest.mark.asyncio
+    async def test_feedback_with_empty_json_string_tools_used(self) -> None:
+        """Empty '[]' string must fall back to an attributed tool, not '[' / ']'."""
+        from unittest.mock import AsyncMock, MagicMock, patch
+
+        from kambo.tools.reporting import report_confirm_finding
+
+        mock_db = AsyncMock()
+        mock_db.get_findings.return_value = [
+            {"id": "FIND-011", "tools_used": "[]", "severity": "high"}
+        ]
+        mock_metrics = MagicMock()
+
+        with patch("kambo.tools.reporting.get_database", return_value=mock_db), \
+             patch("kambo.tools.reporting.get_metrics", return_value=mock_metrics):
+            result = await report_confirm_finding("FIND-011", is_true_positive=False)
+
+        recorded = [c.args[0] for c in mock_metrics.record_user_feedback.call_args_list]
+        assert "[" not in recorded and "]" not in recorded
+        assert recorded == ["unattributed_high"]
+        assert "warning" in result
+
+
+class TestCoerceToolsUsed:
+    """Pure-function tests for tools_used normalization."""
+
+    def test_variants(self) -> None:
+        from kambo.tools.reporting import _coerce_tools_used
+
+        assert _coerce_tools_used(["a", "b"]) == ["a", "b"]
+        assert _coerce_tools_used('["vuln_xss", "vuln_cors"]') == ["vuln_xss", "vuln_cors"]
+        assert _coerce_tools_used("[]") == []           # the bug input — no '[' / ']'
+        assert _coerce_tools_used("") == []
+        assert _coerce_tools_used("vuln_sqli") == ["vuln_sqli"]  # bare, non-JSON
+        assert _coerce_tools_used(None) == []
+        assert _coerce_tools_used(123) == []

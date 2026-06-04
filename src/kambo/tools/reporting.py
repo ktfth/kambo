@@ -364,6 +364,30 @@ async def report_metrics() -> dict:
     return metrics.aggregate_summary()
 
 
+def _coerce_tools_used(raw: object) -> list[str]:
+    """Normalize a finding's ``tools_used`` into a list of tool names.
+
+    ``get_findings`` returns raw DB rows, so ``tools_used`` arrives as the JSON
+    string it was stored as (e.g. ``"[]"`` or ``'["vuln_xss"]'``) rather than a
+    list. Iterating that string directly walks it character by character and
+    records feedback against ``"["`` / ``"]"`` — corrupting per-tool metrics.
+    Coerce JSON or bare strings into a proper list; anything unusable → ``[]``
+    so the empty-list fallback can attribute the feedback instead.
+    """
+    if isinstance(raw, list):
+        return [str(t) for t in raw]
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except (ValueError, TypeError):
+            parsed = raw
+        if isinstance(parsed, list):
+            return [str(t) for t in parsed]
+        if isinstance(parsed, str) and parsed.strip():
+            return [parsed]
+    return []
+
+
 async def report_confirm_finding(
     finding_id: str,
     is_true_positive: bool,
@@ -383,7 +407,7 @@ async def report_confirm_finding(
         return {"error": f"Finding {finding_id} not found"}
 
     finding = matching[0]
-    tools = finding.get("tools_used", [])
+    tools = _coerce_tools_used(finding.get("tools_used", []))
 
     warning = ""
     if not tools:
