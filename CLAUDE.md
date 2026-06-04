@@ -70,3 +70,17 @@ For continuous autonomous improvement, use `/kambo-loop` inside Ralph Loop:
 
 Each iteration: assess → plan → implement → verify → persist. One change per cycle.
 Learnings store at `~/.kambo/learnings.jsonl` provides continuity between iterations.
+
+## Agent skills
+
+### Issue tracker
+
+Issues are tracked in GitHub Issues for `ktfth/kambo` (via the `gh` CLI). See `docs/agents/issue-tracker.md`.
+
+### Triage labels
+
+Canonical triage roles map 1:1 to label strings (`needs-triage`, `needs-info`, `ready-for-agent`, `ready-for-human`, `wontfix`). See `docs/agents/triage-labels.md`.
+
+### Domain docs
+
+Single-context layout (`CONTEXT.md` + `docs/adr/` at the repo root). See `docs/agents/domain.md`.
