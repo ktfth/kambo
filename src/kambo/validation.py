@@ -1791,6 +1791,12 @@ def validate_prototype_pollution(
     if re.search(r"(invalid json|json parse|unexpected token|malformed)", output, re.IGNORECASE):
         return chain.add_fp_check("Server rejected input as malformed JSON — not polluted")
 
+    # FP check: response identical to baseline — injection caused no observable change
+    if baseline_body and output.strip() == baseline_body.strip():
+        return chain.add_fp_check(
+            "Response identical to baseline — prototype injection caused no observable change"
+        )
+
     # Primary signal: injected value appears in unexpected response field
     if injected_value and injected_value in output:
         # Check it's not just reflected in an error
@@ -2126,10 +2132,14 @@ def validate_race_condition(
     # Primary signal: more successes than expected
     extra_successes = len(success_responses) - expected_unique
     if extra_successes > 0:
+        success_previews = ", ".join(
+            f"[{r[0]}] {r[2][:60]}" for r in success_responses[:4]
+        )
         chain = chain.add(
             signal=f"Race condition: {len(success_responses)}/{total} requests succeeded "
                    f"(expected max {expected_unique}){' for: ' + action if action else ''}",
             source="race_condition_analysis",
+            raw_data=success_previews,
             weight=1.0 + min(1.0, extra_successes * 0.2),  # more extras = stronger signal
         )
 
@@ -2140,12 +2150,14 @@ def validate_race_condition(
         chain = chain.add(
             signal=f"All {len(success_responses)} success responses are identical — same state applied multiple times",
             source="race_condition_identity_check",
+            raw_data=success_responses[0][2][:120] if success_responses else "",
             weight=0.8,
         )
     elif len(unique_hashes) > 1:
         chain = chain.add(
             signal=f"Varied responses across {len(success_responses)} successes — concurrent state mutation confirmed",
             source="race_condition_variance_check",
+            raw_data=", ".join(f"[{r[0]}] {r[2][:40]}" for r in success_responses[:3]),
             weight=0.5,
         )
 
