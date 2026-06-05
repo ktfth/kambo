@@ -1203,6 +1203,11 @@ async def get_prompt(name: str, arguments: dict | None = None) -> GetPromptResul
 
 def main() -> None:
     """Run the Kambo MCP server via stdio."""
+    # Load repo-root .env into os.environ before any tool reads credentials
+    # (e.g. HACKERONE_API_USER/TOKEN). No-op for vars already in the environment.
+    from kambo.env_loader import load_dotenv
+    load_dotenv()
+
     async def run():
         db = await get_database()
 
