@@ -535,7 +535,12 @@ async def api_test_misconfig(target: str) -> dict:
     }
 
     metrics.record_run("api_test_misconfig")
-    if chain.total_weight > 0:
+    # Only record a finding at/above the `vulnerable` threshold. A lone missing
+    # security header (weight 0.2) or a single permitted method (0.3) is low-value
+    # noise — recording it as a tentative "finding" inflated the FP surface
+    # (14 tentative/0 confirmed). Real signals (CORS reflection, verbose errors,
+    # or stacked checks) clear 0.5 and are still recorded.
+    if chain.total_weight >= 0.5:
         metrics.record_finding("api_test_misconfig", chain.confidence, chain.total_weight)
 
     return {

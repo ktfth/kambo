@@ -193,10 +193,14 @@ _SPA_FRAMEWORK_MARKERS = [
     "__NEXT_DATA__",          # Next.js
     "__NUXT__",               # Nuxt.js
     "ng-app",                 # Angular
+    "ng-version",             # Angular (compiled)
     "data-reactroot",         # React
     'id="__next"',            # Next.js root div
     'id="app"',               # Vue.js
+    "data-v-app",             # Vue 3 mount point
     "window.__remixContext",  # Remix
+    "__sveltekit",            # SvelteKit
+    "__webpack_require__",    # Webpack-bundled SPA (auto-escaping by default)
 ]
 
 _WAF_SIGNATURES = [
@@ -275,6 +279,17 @@ def validate_xss(
             f"SPA framework detected ({spa_detected[0]}) — modern frameworks"
             " auto-escape output. Verify execution in browser."
         )
+        # SPA auto-escaping blocks a curl-reflected payload from executing in the
+        # browser (same rationale as the CSP I5 gate). A raw byte in the curl
+        # body proves nothing about render-time output, so cap at TENTATIVE until
+        # a browser PoC proves execution. This kills the recurring SPA+CSP FP
+        # where unencoded reflections accumulated weight to FIRM.
+        chain = chain.cap(
+            Confidence.TENTATIVE,
+            f"SPA framework ({spa_detected[0]}) auto-escapes by default — "
+            "curl reflection does not prove browser execution",
+        )
+        chain = chain.add_flag("needs-browser-verification")
 
     # Check if payload is actually reflected
     if payload not in raw_output:
@@ -286,6 +301,18 @@ def validate_xss(
         source="curl/reflection",
         raw_data=_extract_context(raw_output, re.escape(payload)),
         weight=0.3,
+    )
+
+    # Curl reflection cannot prove in-browser execution — the byte appearing in
+    # the response is necessary but not sufficient for XSS. XSS is only CONFIRMED
+    # with a browser PoC (executed script), so cap every curl-derived reflection
+    # at FIRM and flag for browser verification. `cap` only moves the ceiling
+    # down, so a stricter TENTATIVE cap (CSP/SPA/data-block/comment) still wins.
+    chain = chain.add_flag("needs-browser-verification")
+    chain = chain.cap(
+        Confidence.FIRM,
+        "XSS confirmed via curl reflection only — browser execution unproven; "
+        "cap at FIRM until a browser PoC is captured",
     )
 
     # Check if reflection is in an executable context
