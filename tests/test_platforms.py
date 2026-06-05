@@ -96,6 +96,7 @@ class TestH1FetchScope:
 class TestH1CheckDuplicate:
     def test_no_duplicates(self, mock_h1_env) -> None:
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {"data": []}
         mock_resp.raise_for_status = MagicMock()
 
@@ -106,6 +107,7 @@ class TestH1CheckDuplicate:
 
     def test_duplicates_found(self, mock_h1_env) -> None:
         mock_resp = MagicMock()
+        mock_resp.status_code = 200
         mock_resp.json.return_value = {
             "data": [
                 {
@@ -132,6 +134,23 @@ class TestH1CheckDuplicate:
         with patch("kambo.tools.platforms.requests.get", return_value=mock_resp):
             result = h1_check_duplicate("testcorp", "SQL Injection in login", "sqli")
             assert len(result["possible_duplicates"]) >= 1
+
+    @pytest.mark.parametrize("status", [401, 403, 404])
+    def test_unauthorized_degrades_gracefully(self, mock_h1_env, status) -> None:
+        """Valid creds but a non-200 (the Hacker API blocks this endpoint) must
+        NOT raise — return an 'unavailable' warning so the hunt pipeline survives."""
+        mock_resp = MagicMock()
+        mock_resp.status_code = status
+        # raise_for_status would raise, but the code must short-circuit before it
+        mock_resp.raise_for_status.side_effect = AssertionError("should not be called")
+
+        with patch("kambo.tools.platforms.requests.get", return_value=mock_resp):
+            result = h1_check_duplicate("indrive", "Exposed API key", "exposed_api_key")
+
+        assert result["possible_duplicates"] == []
+        assert result["duplicate_risk"] == "unknown"
+        assert str(status) in result["warning"]
+        assert "hacktivity" in result["warning"].lower()
 
 
 class TestH1SubmitReport:

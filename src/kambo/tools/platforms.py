@@ -13,7 +13,6 @@ API credentials are read from environment variables:
 from __future__ import annotations
 
 import asyncio
-import json
 import os
 from typing import Any
 from urllib.parse import quote
@@ -148,10 +147,24 @@ def h1_check_duplicate(handle: str, title: str, vuln_type: str = "") -> dict[str
         timeout=30,
     )
 
-    if resp.status_code == 404:
-        return {"platform": "hackerone", "handle": handle, "possible_duplicates": [], "warning": "Could not access reports"}
+    # The Hacker REST API does not reliably expose other researchers' disclosed
+    # reports at this endpoint — 401/403/404 are returned even with valid
+    # credentials (disclosed reports live behind the Hacktivity GraphQL API).
+    # Degrade gracefully instead of raising so hunt pipelines don't break on the
+    # duplicate-check step.
+    if resp.status_code != 200:
+        return {
+            "platform": "hackerone",
+            "handle": handle,
+            "possible_duplicates": [],
+            "duplicate_risk": "unknown",
+            "warning": (
+                f"Duplicate check unavailable (HTTP {resp.status_code}). The Hacker "
+                "API does not expose disclosed program reports at this endpoint — "
+                f"review manually at https://hackerone.com/{handle}/hacktivity"
+            ),
+        }
 
-    resp.raise_for_status()
     reports = resp.json().get("data", [])
 
     possible_dupes = []
