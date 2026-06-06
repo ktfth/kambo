@@ -620,6 +620,7 @@ async def list_tools() -> list[Tool]:
                 "remediation": {"type": "string"},
                 "cvss": {"type": "number"},
                 "evidence_signals": {"type": "array", "items": {"type": "object"}, "description": "Evidence signals [{signal, source, raw_data, weight}]"},
+                "tools_used": {"type": "array", "items": {"type": "string"}, "description": "Tool/skill names that produced this finding (e.g. ['vuln_cors','kambo-js-hunt']). Used to attribute calibration feedback from report_confirm_finding to the right tool — without it, feedback lands in an 'unattributed_<severity>' bucket and improves no real tool's precision."},
             },
             "required": ["title", "severity", "target", "description"],
         }),

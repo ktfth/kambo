@@ -355,3 +355,47 @@ class TestBountyPricingTools:
         from kambo.tools.bounty import bounty_timer_reset
         result = await bounty_timer_reset()
         assert result["status"] == "reset"
+
+
+class TestCategory7Gate:
+    """Info/infra/version disclosure WITHOUT a PoC is flagged likely-ineligible;
+    a PoC (demonstrated exploitation) lifts the finding out of category 7."""
+
+    def _est(self, vuln_type: str, has_poc: bool):
+        return estimate_finding_value(
+            title=f"{vuln_type} finding",
+            severity=Severity.LOW,
+            confidence=Confidence.FIRM,
+            vuln_type=vuln_type,
+            payouts=ProgramPayouts(payout_low=500),
+            has_poc=has_poc,
+            has_reproduction_steps=True,
+            evidence_signals_count=3,
+        )
+
+    def test_info_disclosure_without_poc_flagged(self) -> None:
+        est = self._est("information_disclosure", has_poc=False)
+        assert any("category-7" in b.lower() for b in est.readiness_blockers)
+
+    def test_exposed_api_key_without_poc_penalized(self) -> None:
+        # FIND-027-like: exposed key with no demonstrated exploitation.
+        no_poc = self._est("exposed_api_key", has_poc=False)
+        with_poc = self._est("exposed_api_key", has_poc=True)
+        # Acceptance is heavily down-ranked (×0.2) and expected value drops.
+        assert no_poc.acceptance_factor < with_poc.acceptance_factor
+        assert no_poc.expected_value < with_poc.expected_value
+        assert any("category-7" in b.lower() for b in no_poc.readiness_blockers)
+
+    def test_poc_lifts_out_of_category7(self) -> None:
+        # FIND-024-like: exposed key WITH a demonstrated billing-abuse PoC.
+        est = self._est("exposed_api_key", has_poc=True)
+        assert not any("category-7" in b.lower() for b in est.readiness_blockers)
+
+    def test_source_map_exposure_without_poc_flagged(self) -> None:
+        est = self._est("source_map_exposure", has_poc=False)
+        assert any("category-7" in b.lower() for b in est.readiness_blockers)
+
+    def test_real_vuln_type_not_flagged(self) -> None:
+        # A real exploitable class (sqli) is never category-7, even without a PoC.
+        est = self._est("sqli", has_poc=False)
+        assert not any("category-7" in b.lower() for b in est.readiness_blockers)

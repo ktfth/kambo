@@ -75,6 +75,24 @@ _VULN_ACCEPTANCE_RATES: dict[str, float] = {
     "version_disclosure": 0.15,
 }
 
+# Category 7 (HackerOne pre-submission validators): infrastructure / version /
+# banner / generic information disclosure WITHOUT demonstrated exploitation is
+# commonly marked ineligible. A working PoC (control-vs-bypass + quantified
+# impact) lifts a finding out of this bucket — so these types are penalized only
+# when submitted WITHOUT a PoC.
+_INFO_DISCLOSURE_TYPES: frozenset[str] = frozenset({
+    "information_disclosure",
+    "infrastructure_disclosure",
+    "version_disclosure",
+    "banner_disclosure",
+    "missing_headers",
+    "source_map_exposure",
+    "sourcemap",
+    "exposed_api_key",
+    "api_key_disclosure",
+    "credential_exposure",
+})
+
 # Confidence → probability the finding is real (not FP)
 _CONFIDENCE_MULTIPLIERS: dict[Confidence, float] = {
     Confidence.CONFIRMED: 0.95,  # 95% chance it's real
@@ -175,6 +193,18 @@ def estimate_finding_value(
     vuln_key = vuln_type.lower().replace(" ", "_").replace("-", "_")
     acceptance_factor = _VULN_ACCEPTANCE_RATES.get(vuln_key, 0.50)
 
+    # Category-7 gate: info/infra/version disclosure WITHOUT demonstrated
+    # exploitation is commonly ineligible. A PoC lifts it out of category 7.
+    category7_blocker = ""
+    if vuln_key in _INFO_DISCLOSURE_TYPES and not has_poc:
+        acceptance_factor *= 0.2
+        category7_blocker = (
+            "Category-7 risk: information/infrastructure/version disclosure "
+            "without demonstrated exploitation is commonly marked ineligible. "
+            "Add a concrete exploitation scenario (control-vs-bypass + quantified "
+            "impact) or a working PoC before submitting."
+        )
+
     # Factor 3: Downgrade probability
     downgrade_info = _SEVERITY_DOWNGRADE.get(severity, {"factor": 1.0})
     downgrade_factor = downgrade_info["factor"]
@@ -198,6 +228,10 @@ def estimate_finding_value(
     readiness, blockers = _assess_readiness(
         confidence, has_poc, has_reproduction_steps, evidence_signals_count
     )
+    if category7_blocker:
+        # Surface the ineligibility risk. (An unexploited category-7 finding
+        # already cannot be READY, since READY requires has_poc=True.)
+        blockers = [*blockers, category7_blocker]
 
     # ROI calculation
     dollar_per_hour = expected_value / hours_spent if hours_spent > 0 else 0
