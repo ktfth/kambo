@@ -111,7 +111,8 @@ show_post() {
   fi
 
   local platform
-  if [[ "$post_file" == twitter/* ]];   then platform="🐦 TWITTER / X"
+  if [[ "$post_file" == threads/* ]];   then platform="🐸 THREADS"
+  elif [[ "$post_file" == twitter/* ]];   then platform="🐦 TWITTER / X"
   elif [[ "$post_file" == linkedin/* ]]; then platform="💼 LINKEDIN"
   elif [[ "$post_file" == instagram/* ]]; then platform="📸 INSTAGRAM"
   else platform="📣 SOCIAL MEDIA"
