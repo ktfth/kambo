@@ -1,0 +1,179 @@
+name: 📣 Post Diário Kambo (18h BRT)
+
+on:
+  schedule:
+    # 21h UTC = 18h BRT (UTC-3)
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+    inputs:
+      day:
+        description: "Dia específico (1-30). Vazio = automático"
+        required: false
+        default: ""
+
+env:
+  # Data de início do ciclo de 30 dias (formato YYYY-MM-DD)
+  CYCLE_START_DATE: "2026-06-09"
+
+permissions:
+  issues: write
+  contents: read
+
+jobs:
+  post-do-dia:
+    name: Gerar post do dia
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configurar Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Instalar dependências mínimas
+        run: pip install python-dotenv
+
+      - name: Gerar post do dia
+        id: post
+        run: |
+          cd social-media
+
+          # Calcular o dia do ciclo (ou usar input manual)
+          if [ -n "${{ github.event.inputs.day }}" ]; then
+            DAY_NUM="${{ github.event.inputs.day }}"
+          else
+            START="${{ env.CYCLE_START_DATE }}"
+            TODAY=$(TZ=America/Sao_Paulo date +%Y-%m-%d)
+            DIFF=$(python3 -c "from datetime import date; print((date.fromisoformat('$TODAY') - date.fromisoformat('$START')).days)")
+            DAY_NUM=$(python3 -c "print((($DIFF % 30) + 1))")
+          fi
+
+          echo "day=$DAY_NUM" >> "$GITHUB_OUTPUT"
+
+          # Extrair arquivo do post
+          POST_FILE=$(python3 -c "
+          import json
+          with open('posts-map.json') as f:
+              m = json.load(f)
+          print(m.get(str($DAY_NUM), ''))
+          ")
+
+          echo "post_file=$POST_FILE" >> "$GITHUB_OUTPUT"
+
+          # Determinar plataforma
+          if echo "$POST_FILE" | grep -q "twitter"; then
+            PLATFORM="🐦 Twitter / X"
+          elif echo "$POST_FILE" | grep -q "linkedin"; then
+            PLATFORM="💼 LinkedIn"
+          elif echo "$POST_FILE" | grep -q "instagram"; then
+            PLATFORM="📸 Instagram"
+          else
+            PLATFORM="📣 Social Media"
+          fi
+
+          echo "platform=$PLATFORM" >> "$GITHUB_OUTPUT"
+
+          # Extrair texto do primeiro bloco de código
+          POST_TEXT=$(python3 -c "
+          import re, sys
+          with open('posts/$POST_FILE') as f:
+              content = f.read()
+          blocks = re.findall(r'\`\`\`\n(.*?)\`\`\`', content, re.DOTALL)
+          print(blocks[0].strip() if blocks else content.strip())
+          ")
+
+          # Salvar como arquivo para o próximo step
+          echo "$POST_TEXT" > /tmp/post-text.txt
+          CHAR_COUNT=$(echo -n "$POST_TEXT" | wc -c)
+          echo "chars=$CHAR_COUNT" >> "$GITHUB_OUTPUT"
+
+      - name: Exibir post no log do Actions
+        run: |
+          DAY="${{ steps.post.outputs.day }}"
+          PLATFORM="${{ steps.post.outputs.platform }}"
+          CHARS="${{ steps.post.outputs.chars }}"
+          FILE="${{ steps.post.outputs.post_file }}"
+
+          echo ""
+          echo "╔══════════════════════════════════════════════════════════════╗"
+          echo "║  🐸 KAMBO — Post do Dia $DAY de 30 | $(TZ=America/Sao_Paulo date '+%d/%m/%Y %H:%M') BRT  ║"
+          echo "║  $PLATFORM"
+          echo "╚══════════════════════════════════════════════════════════════╝"
+          echo ""
+          cat /tmp/post-text.txt
+          echo ""
+          echo "──────────────────────────────────────────────────────────────"
+          echo "📊 $CHARS caracteres | 📁 social-media/posts/$FILE"
+          echo "🔗 https://github.com/ktfth/kambo"
+          echo "──────────────────────────────────────────────────────────────"
+
+      - name: Criar issue de lembrete
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const fs = require('fs');
+            const postText = fs.readFileSync('/tmp/post-text.txt', 'utf8');
+            const day = '${{ steps.post.outputs.day }}';
+            const platform = '${{ steps.post.outputs.platform }}';
+            const chars = '${{ steps.post.outputs.chars }}';
+            const file = '${{ steps.post.outputs.post_file }}';
+
+            // Garantir que o label existe
+            try {
+              await github.rest.issues.getLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'social-media',
+              });
+            } catch {
+              await github.rest.issues.createLabel({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                name: 'social-media',
+                color: '0075ca',
+                description: 'Posts de divulgação nas redes sociais',
+              });
+            }
+
+            // Data de hoje no fuso de Brasília
+            const now = new Date();
+            const brDate = now.toLocaleDateString('pt-BR', {
+              timeZone: 'America/Sao_Paulo',
+              day: '2-digit', month: '2-digit', year: 'numeric'
+            });
+
+            const body = [
+              `## 🐸 Post do Dia ${day}/30 — ${brDate}`,
+              ``,
+              `**Plataforma:** ${platform}`,
+              `**Caracteres:** ${chars}`,
+              `**Arquivo:** \`social-media/posts/${file}\``,
+              ``,
+              `---`,
+              ``,
+              `### Texto para publicar`,
+              ``,
+              `\`\`\``,
+              postText,
+              `\`\`\``,
+              ``,
+              `---`,
+              ``,
+              `### Ações`,
+              ``,
+              `- [ ] Publicar no ${platform}`,
+              `- [ ] Verificar engajamento no dia seguinte`,
+              ``,
+              `🔗 [Repositório](https://github.com/ktfth/kambo) | [Todos os posts](https://github.com/ktfth/kambo/tree/main/social-media/posts)`,
+            ].join('\n');
+
+            await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              title: `📣 Post do Dia ${day}/30 — ${brDate} — ${platform}`,
+              body,
+              labels: ['social-media'],
+            });
