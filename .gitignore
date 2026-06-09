@@ -25,6 +25,7 @@ tmp/
 social-media/.start-date
 social-media/.env
 social-media/post-log.jsonl
+social-media/post-log.txt
 social-media/debug-screenshot*.png
 social-media/post-confirma-*.png
 typescript
