@@ -108,7 +108,9 @@ def extract_post_text(markdown_path: Path) -> str:
 
 def get_platform_label(post_path: str) -> str:
     """Retorna o emoji e nome da plataforma baseado no caminho."""
-    if "twitter" in post_path:
+    if "threads" in post_path:
+        return "🧵 Threads"
+    elif "twitter" in post_path:
         return "🐦 Twitter / X"
     elif "linkedin" in post_path:
         return "💼 LinkedIn"
