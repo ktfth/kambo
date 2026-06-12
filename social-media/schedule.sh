@@ -111,9 +111,10 @@ show_post() {
   fi
 
   local platform
-  if [[ "$post_file" == twitter/* ]];   then platform="🐦 TWITTER / X"
+  if [[ "$post_file" == twitter/* ]];    then platform="🐦 TWITTER / X"
   elif [[ "$post_file" == linkedin/* ]]; then platform="💼 LINKEDIN"
-  elif [[ "$post_file" == instagram/* ]]; then platform="📸 INSTAGRAM"
+  elif [[ "$post_file" == instagram/* ]];then platform="📸 INSTAGRAM"
+  elif [[ "$post_file" == threads/* ]];  then platform="🧵 THREADS"
   else platform="📣 SOCIAL MEDIA"
   fi
 
@@ -154,6 +155,7 @@ for day in range(1, 31):
     if "twitter"   in path: icon = "🐦"
     elif "linkedin"  in path: icon = "💼"
     elif "instagram" in path: icon = "📸"
+    elif "threads"   in path: icon = "🧵"
     else: icon = "❓"
     print(f"  Dia {day:02d}: {status} {icon} {path}")
 PYEOF
