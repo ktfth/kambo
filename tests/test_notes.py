@@ -1,0 +1,288 @@
+"""Tests for the attack-vector-centric engagement notes store."""
+
+from __future__ import annotations
+
+import json
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from kambo.notes import (
+    AttackVector,
+    Note,
+    NotesStore,
+    VectorStance,
+    get_notes_store,
+)
+
+
+def _ts(offset_seconds: int = 0) -> str:
+    """Deterministic ISO timestamp helper for ordering assertions."""
+    base = datetime(2026, 6, 14, 12, 0, 0, tzinfo=timezone.utc)
+    return (base + timedelta(seconds=offset_seconds)).isoformat()
+
+
+class TestNoteModel:
+    def test_create_note(self) -> None:
+        n = Note(
+            vector=AttackVector.IDOR,
+            target="api.example.com/users/1",
+            observation="Sequential numeric ids, no ownership check seen",
+            stance=VectorStance.SUSPECTED,
+            confidence=7,
+            tags=["api", "rest"],
+        )
+        assert n.vector is AttackVector.IDOR
+        assert n.stance is VectorStance.SUSPECTED
+        assert n.confidence == 7
+
+    def test_defaults(self) -> None:
+        n = Note(vector=AttackVector.XSS, target="x.com", observation="reflects q param")
+        assert n.stance is VectorStance.UNTESTED
+        assert n.confidence == 5
+        assert n.source == "operator"
+        assert n.id == ""
+
+    def test_note_is_frozen(self) -> None:
+        n = Note(vector=AttackVector.SQLI, target="x.com", observation="o")
+        with pytest.raises(Exception):
+            n.observation = "changed"  # type: ignore
+
+    def test_string_coercion_to_enum(self) -> None:
+        n = Note(vector="ssrf", target="x.com", observation="o", stance="probing")  # type: ignore[arg-type]
+        assert n.vector is AttackVector.SSRF
+        assert n.stance is VectorStance.PROBING
+
+    def test_json_round_trip_serializes_enums_as_strings(self) -> None:
+        n = Note(vector=AttackVector.JWT, target="x.com", observation="alg none?")
+        dumped = n.model_dump(mode="json")
+        assert dumped["vector"] == "jwt"
+        assert dumped["stance"] == "untested"
+        # Survives a JSON round trip.
+        restored = Note(**json.loads(json.dumps(dumped)))
+        assert restored.vector is AttackVector.JWT
+
+
+class TestAddAndQuery:
+    def _store(self, tmp_path: Path) -> NotesStore:
+        return NotesStore(tmp_path / "notes.jsonl")
+
+    def test_add_and_query(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="found"))
+        results = store.query()
+        assert len(results) == 1
+        assert results[0]["vector"] == "idor"
+
+    def test_filter_by_vector(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="a"))
+        store.add(Note(vector=AttackVector.XSS, target="x.com", observation="b"))
+        results = store.query(vector="idor")
+        assert len(results) == 1
+        assert results[0]["vector"] == "idor"
+
+    def test_filter_by_target_substring(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="api.example.com", observation="a"))
+        store.add(Note(vector=AttackVector.IDOR, target="www.other.com", observation="b"))
+        results = store.query(target="example")
+        assert len(results) == 1
+        assert "example" in results[0]["target"]
+
+    def test_filter_by_stance(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.SQLI, target="x.com", observation="a", stance=VectorStance.CONFIRMED))
+        store.add(Note(vector=AttackVector.SQLI, target="x.com", observation="b", stance=VectorStance.UNTESTED))
+        results = store.query(stance="confirmed")
+        assert len(results) == 1
+        assert results[0]["stance"] == "confirmed"
+
+    def test_filter_by_keyword(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.SSRF, target="x.com", observation="metadata endpoint reachable"))
+        store.add(Note(vector=AttackVector.SSRF, target="x.com", observation="blocked by allowlist"))
+        results = store.query(keyword="metadata")
+        assert len(results) == 1
+        assert "metadata" in results[0]["observation"]
+
+    def test_filter_by_min_confidence(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.XSS, target="x.com", observation="strong", confidence=9))
+        store.add(Note(vector=AttackVector.XSS, target="x.com", observation="weak", confidence=2))
+        results = store.query(min_confidence=5)
+        assert len(results) == 1
+        assert results[0]["observation"] == "strong"
+
+    def test_limit(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        for i in range(10):
+            store.add(Note(vector=AttackVector.RECON, target="x.com", observation=f"n{i}"))
+        assert len(store.query(limit=3)) == 3
+
+    def test_newest_first(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.RECON, target="x.com", observation="old", timestamp=_ts(0)))
+        store.add(Note(vector=AttackVector.RECON, target="x.com", observation="new", timestamp=_ts(10)))
+        results = store.query()
+        assert results[0]["observation"] == "new"
+
+
+class TestDedup:
+    def _store(self, tmp_path: Path) -> NotesStore:
+        return NotesStore(tmp_path / "notes.jsonl")
+
+    def test_same_id_latest_wins(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="candidate",
+                       stance=VectorStance.UNTESTED, id="idor-1", timestamp=_ts(0)))
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="exploited!",
+                       stance=VectorStance.CONFIRMED, id="idor-1", timestamp=_ts(10)))
+        results = store.query()
+        assert len(results) == 1
+        assert results[0]["stance"] == "confirmed"
+        assert results[0]["observation"] == "exploited!"
+
+    def test_empty_id_notes_kept_separately(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.RECON, target="x.com", observation="a"))
+        store.add(Note(vector=AttackVector.RECON, target="x.com", observation="b"))
+        assert len(store.query()) == 2
+
+    def test_count_is_raw_not_deduped(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="a", id="k"))
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="b", id="k"))
+        assert store.count() == 2
+        assert len(store.query()) == 1
+
+
+class TestByVectorPivot:
+    def _store(self, tmp_path: Path) -> NotesStore:
+        return NotesStore(tmp_path / "notes.jsonl")
+
+    def test_pivot_groups_by_vector(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="a.com", observation="x"))
+        store.add(Note(vector=AttackVector.IDOR, target="b.com", observation="y"))
+        store.add(Note(vector=AttackVector.XSS, target="a.com", observation="z"))
+        pivot = store.by_vector()
+        assert pivot["idor"]["count"] == 2
+        assert pivot["idor"]["targets"] == ["a.com", "b.com"]
+        assert pivot["xss"]["count"] == 1
+
+    def test_pivot_reports_strongest_stance(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.SQLI, target="x.com", observation="a", stance=VectorStance.SUSPECTED))
+        store.add(Note(vector=AttackVector.SQLI, target="x.com", observation="b", stance=VectorStance.CONFIRMED))
+        store.add(Note(vector=AttackVector.SQLI, target="x.com", observation="c", stance=VectorStance.UNTESTED))
+        assert store.by_vector()["sqli"]["stance"] == "confirmed"
+
+    def test_pivot_reports_latest_observation(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.SSRF, target="x.com", observation="first", timestamp=_ts(0)))
+        store.add(Note(vector=AttackVector.SSRF, target="x.com", observation="second", timestamp=_ts(10)))
+        assert store.by_vector()["ssrf"]["latest"] == "second"
+
+    def test_pivot_target_filter(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="keep.com", observation="a"))
+        store.add(Note(vector=AttackVector.XSS, target="drop.com", observation="b"))
+        pivot = store.by_vector(target="keep")
+        assert "idor" in pivot
+        assert "xss" not in pivot
+
+
+class TestBoard:
+    def _store(self, tmp_path: Path) -> NotesStore:
+        return NotesStore(tmp_path / "notes.jsonl")
+
+    def test_active_vectors_lead(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.SQLI, target="x.com", observation="done",
+                       stance=VectorStance.CONFIRMED, confidence=9))
+        store.add(Note(vector=AttackVector.XSS, target="x.com", observation="working",
+                       stance=VectorStance.PROBING, confidence=4))
+        board = store.board()
+        # PROBING is active and should lead despite lower confidence.
+        assert board[0]["vector"] == "xss"
+        assert board[0]["active"] is True
+
+    def test_next_action_hint_present(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="o",
+                       stance=VectorStance.UNTESTED))
+        row = store.board()[0]
+        assert "probe this vector" in row["next_action"]
+
+    def test_confirmed_ranks_above_ruled_out(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.SQLI, target="x.com", observation="a",
+                       stance=VectorStance.RULED_OUT, confidence=5))
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="b",
+                       stance=VectorStance.CONFIRMED, confidence=5))
+        order = [r["vector"] for r in store.board()]
+        assert order.index("idor") < order.index("sqli")
+
+
+class TestCoverage:
+    def _store(self, tmp_path: Path) -> NotesStore:
+        return NotesStore(tmp_path / "notes.jsonl")
+
+    def test_coverage_reports_blind_spots(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="a"))
+        cov = store.coverage()
+        assert "idor" in cov["touched"]
+        assert "ssrf" in cov["untouched"]
+        assert cov["touched_count"] == 1
+        assert cov["total_vectors"] == len(list(AttackVector))
+
+    def test_coverage_lists_confirmed(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.JWT, target="x.com", observation="forged",
+                       stance=VectorStance.CONFIRMED))
+        store.add(Note(vector=AttackVector.XSS, target="x.com", observation="maybe",
+                       stance=VectorStance.SUSPECTED))
+        cov = store.coverage()
+        assert cov["confirmed"] == ["jwt"]
+
+    def test_coverage_pct(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        store.add(Note(vector=AttackVector.IDOR, target="x.com", observation="a"))
+        cov = store.coverage()
+        expected = round(100 / len(list(AttackVector)))
+        assert cov["coverage_pct"] == expected
+
+
+class TestPersistence:
+    def test_persists_across_instances(self, tmp_path: Path) -> None:
+        path = tmp_path / "notes.jsonl"
+        s1 = NotesStore(path)
+        s1.add(Note(vector=AttackVector.IDOR, target="x.com", observation="persisted"))
+        s2 = NotesStore(path)
+        assert len(s2.query()) == 1
+
+    def test_corrupt_lines_skipped(self, tmp_path: Path) -> None:
+        path = tmp_path / "notes.jsonl"
+        path.write_text("not json\n{bad json\n", encoding="utf-8")
+        store = NotesStore(path)
+        assert store.query() == []
+
+    def test_empty_store(self, tmp_path: Path) -> None:
+        store = NotesStore(tmp_path / "absent.jsonl")
+        assert store.query() == []
+        assert store.by_vector() == {}
+        assert store.board() == []
+        assert store.coverage()["touched_count"] == 0
+
+
+class TestSingleton:
+    def test_get_notes_store_is_singleton(self, tmp_path: Path) -> None:
+        import kambo.notes as notes_module
+        notes_module._store = None  # reset for test isolation
+        s1 = get_notes_store(tmp_path / "notes.jsonl")
+        s2 = get_notes_store()
+        assert s1 is s2
+        notes_module._store = None
