@@ -130,17 +130,34 @@ class Note(BaseModel):
 
 
 class NotesStore:
-    """Append-only JSONL store of vector-tagged engagement notes.
+    """Vector-tagged engagement notes — **ephemeral (per-session) by default**.
+
+    Constructed with ``path=None`` (the default) the store lives entirely in
+    memory: nothing is written to disk, so real engagement data (target names,
+    vulnerabilities, internal hosts) never persists across sessions and can
+    never leak into the project tree. The process *is* the session — when the
+    MCP server stops, the notes are gone.
+
+    Persistence is an explicit opt-in: pass a ``path`` (which must live outside
+    the repository) and the store mirrors :class:`~kambo.learnings.LearningsStore`
+    as an append-only JSONL file. Tests use a ``tmp_path``; an operator can set
+    ``KAMBO_NOTES_PATH`` if they knowingly want cross-session continuity.
 
     Reads deduplicate by ``id`` (latest wins) so a note can be progressed
     (e.g. UNTESTED → CONFIRMED) by re-adding it with the same id. Notes with
     an empty id are kept as independent journal entries.
     """
 
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path | None = None) -> None:
         self._path = path
+        self._ephemeral = path is None
         self._notes: list[Note] = []
         self._loaded = False
+
+    @property
+    def is_ephemeral(self) -> bool:
+        """True when notes live in memory only (no disk persistence)."""
+        return self._ephemeral
 
     # -- persistence -------------------------------------------------------
 
@@ -148,7 +165,7 @@ class NotesStore:
         if self._loaded:
             return
         self._loaded = True
-        if not self._path.exists():
+        if self._ephemeral or self._path is None or not self._path.exists():
             return
         for line in self._path.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -160,12 +177,23 @@ class NotesStore:
                 continue  # skip corrupt entries
 
     def add(self, note: Note) -> None:
-        """Append a note. O(1) write; dedup happens at read time."""
+        """Append a note. O(1) write; dedup happens at read time.
+
+        In ephemeral mode the note is kept in memory only — no file is touched.
+        """
         self._ensure_loaded()
         self._notes.append(note)
+        if self._ephemeral or self._path is None:
+            return
         self._path.parent.mkdir(parents=True, exist_ok=True)
         with self._path.open("a", encoding="utf-8") as f:
             f.write(json.dumps(note.model_dump(mode="json")) + "\n")
+
+    def clear(self) -> None:
+        """Drop all in-memory notes (session reset). Does not delete a backing
+        file — persistence, when opted in, is append-only and kept intact."""
+        self._notes = []
+        self._loaded = True
 
     def _effective(self) -> list[Note]:
         """Deduplicated view: latest entry per non-empty id, plus all
@@ -294,13 +322,22 @@ class NotesStore:
         return list(self._notes)
 
 
-# Project-scoped singleton (override path in tests via the constructor).
+# Session-scoped singleton. Default is ephemeral (in-memory): engagement note
+# data does not persist and cannot compromise the project. Persistence is
+# opt-in via an explicit ``path`` or the ``KAMBO_NOTES_PATH`` env var (config).
 _store: NotesStore | None = None
-_NOTES_PATH = Path.home() / ".kambo" / "notes.jsonl"
 
 
 def get_notes_store(path: Path | None = None) -> NotesStore:
     global _store
     if _store is None:
-        _store = NotesStore(path or _NOTES_PATH)
+        if path is None:
+            # Honor an explicit opt-in only; otherwise stay ephemeral.
+            try:
+                from kambo.config import get_config
+
+                path = get_config().notes_path
+            except Exception:
+                path = None
+        _store = NotesStore(path)
     return _store

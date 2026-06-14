@@ -23,6 +23,11 @@ class KamboConfig(BaseSettings):
     output_dir: Path = Field(default_factory=lambda: Path("./output"))
     wordlists_dir: Path = Field(default_factory=lambda: Path("./wordlists"))
     db_path: Path = Field(default_factory=lambda: Path("./output/kambo.db"))
+    # Engagement notes persistence is OPT-IN. Default None = ephemeral,
+    # per-session, in-memory only (engagement data never touches disk). Set
+    # KAMBO_NOTES_PATH to a path OUTSIDE the repo only if cross-session
+    # continuity is knowingly wanted.
+    notes_path: Path | None = None
 
     # Rate limiting
     recon_rate_limit: int = 10  # requests per second
