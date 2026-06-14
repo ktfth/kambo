@@ -86,7 +86,7 @@ class TestAddAndQuery:
     def test_filter_by_target_substring(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
         store.add(Note(vector=AttackVector.IDOR, target="api.example.com", observation="a"))
-        store.add(Note(vector=AttackVector.IDOR, target="www.other.com", observation="b"))
+        store.add(Note(vector=AttackVector.IDOR, target="www.other.test", observation="b"))
         results = store.query(target="example")
         assert len(results) == 1
         assert "example" in results[0]["target"]
@@ -164,12 +164,12 @@ class TestByVectorPivot:
 
     def test_pivot_groups_by_vector(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
-        store.add(Note(vector=AttackVector.IDOR, target="a.com", observation="x"))
-        store.add(Note(vector=AttackVector.IDOR, target="b.com", observation="y"))
-        store.add(Note(vector=AttackVector.XSS, target="a.com", observation="z"))
+        store.add(Note(vector=AttackVector.IDOR, target="a.example.com", observation="x"))
+        store.add(Note(vector=AttackVector.IDOR, target="b.example.com", observation="y"))
+        store.add(Note(vector=AttackVector.XSS, target="a.example.com", observation="z"))
         pivot = store.by_vector()
         assert pivot["idor"]["count"] == 2
-        assert pivot["idor"]["targets"] == ["a.com", "b.com"]
+        assert pivot["idor"]["targets"] == ["a.example.com", "b.example.com"]
         assert pivot["xss"]["count"] == 1
 
     def test_pivot_reports_strongest_stance(self, tmp_path: Path) -> None:
@@ -187,8 +187,8 @@ class TestByVectorPivot:
 
     def test_pivot_target_filter(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
-        store.add(Note(vector=AttackVector.IDOR, target="keep.com", observation="a"))
-        store.add(Note(vector=AttackVector.XSS, target="drop.com", observation="b"))
+        store.add(Note(vector=AttackVector.IDOR, target="keep.example.com", observation="a"))
+        store.add(Note(vector=AttackVector.XSS, target="drop.example.com", observation="b"))
         pivot = store.by_vector(target="keep")
         assert "idor" in pivot
         assert "xss" not in pivot
