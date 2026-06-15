@@ -1,0 +1,68 @@
+name: social-media-poster
+
+on:
+  schedule:
+    # 18h00 BRT (UTC-3) = 21h00 UTC, todos os dias
+    - cron: "0 21 * * *"
+  workflow_dispatch:
+    inputs:
+      day:
+        description: "Dia específico do ciclo (1-30). Deixe em branco para usar o dia de hoje."
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry-run: exibe o post sem publicar"
+        required: false
+        type: boolean
+        default: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+          cache: pip
+
+      - name: Install dependencies
+        run: pip install httpx python-dotenv
+
+      - name: Publish post
+        env:
+          POSTER_MODE: api
+          THREADS_USER_ID: ${{ secrets.THREADS_USER_ID }}
+          THREADS_ACCESS_TOKEN: ${{ secrets.THREADS_ACCESS_TOKEN }}
+          # Data de início do ciclo. .start-date está no .gitignore,
+          # então esta variável é a fonte de verdade para o GitHub Actions.
+          KAMBO_START_DATE: "2026-06-15"
+        run: |
+          cd social-media
+
+          DAY="${{ github.event.inputs.day }}"
+          DRY_RUN="${{ github.event.inputs.dry_run }}"
+
+          if [ -n "$DAY" ]; then
+            CMD="day $DAY"
+          else
+            CMD="today"
+          fi
+
+          if [ "$DRY_RUN" = "true" ]; then
+            python poster.py $CMD --dry-run
+          else
+            python poster.py $CMD
+          fi
+
+      - name: Upload post log
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: post-log-${{ github.run_id }}
+          path: social-media/post-log.jsonl
+          retention-days: 90
+          if-no-files-found: ignore
