@@ -5,6 +5,7 @@ from __future__ import annotations
 import pytest
 
 import kambo.notes as notes_module
+from kambo.notes import VectorStance
 from kambo.tools.notes import note_add, note_query
 
 
@@ -116,6 +117,27 @@ class TestNoteQuery:
         assert set(cov["touched"]) == {"idor", "xss", "ssrf"}
         assert "jwt" in cov["untouched"]
         assert cov["confirmed"] == ["xss"]
+
+    async def test_board_has_vector_specific_next_step(self) -> None:
+        await note_add("idor", "api.example.com", "a", stance="untested")
+        res = await note_query(mode="board")
+        assert "object id" in res["board"][0]["next_action"]
+
+    async def test_playbook_mode(self) -> None:
+        res = await note_query(mode="playbook", vector="ssrf")
+        assert res["vector"] == "ssrf"
+        ladder = res["playbook"]
+        # Full stance ladder present, untested step is vector-specific.
+        assert set(ladder.keys()) == {s.value for s in VectorStance}
+        assert "OOB" in ladder["untested"]
+
+    async def test_playbook_mode_requires_vector(self) -> None:
+        res = await note_query(mode="playbook")
+        assert "error" in res
+
+    async def test_playbook_mode_unknown_vector_errors(self) -> None:
+        res = await note_query(mode="playbook", vector="bogus")
+        assert "error" in res
 
     async def test_unknown_mode_errors(self) -> None:
         res = await note_query(mode="bogus")

@@ -85,12 +85,12 @@ _TOOL_REGISTRY: dict[str, _ToolEntry] = {
     ),
     "note_query": _ToolEntry(
         tool=Tool(name="note_query",
-                  description="Query per-session notes through an attack-vector lens — modes: list | by_vector (pivot) | board (progress + next actions) | coverage (blind spots).",
+                  description="Query per-session notes through an attack-vector lens — modes: list | by_vector (pivot) | board (progress + vector-specific next steps) | coverage (blind spots) | playbook (how to push a vector untested→confirmed).",
                   inputSchema={
                       "type": "object",
                       "properties": {
-                          "mode": {"type": "string", "enum": ["list", "by_vector", "board", "coverage"], "description": "View to return (default list)"},
-                          "vector": {"type": "string", "description": "Filter by vector (list mode)"},
+                          "mode": {"type": "string", "enum": ["list", "by_vector", "board", "coverage", "playbook"], "description": "View to return (default list)"},
+                          "vector": {"type": "string", "description": "Filter by vector (list mode); required in playbook mode"},
                           "target": {"type": "string", "description": "Filter/scope by target substring"},
                           "stance": {"type": "string", "description": "Filter by stance (list mode)"},
                           "keyword": {"type": "string", "description": "Substring match on observation (list mode)"},

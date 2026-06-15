@@ -21,6 +21,7 @@ from kambo.notes import (
     Note,
     VectorStance,
     get_notes_store,
+    next_action_for,
     stance_rank,
 )
 
@@ -151,8 +152,10 @@ async def note_query(
     Modes:
         list      — flat filtered notes, newest first.
         by_vector — pivot: one summary per vector (count, strongest stance, targets).
-        board     — progress board, attention-ordered, with next-action hints.
+        board     — progress board, attention-ordered, with vector-specific next steps.
         coverage  — blind-spot view: touched vs untouched vectors.
+        playbook  — the full stance-by-stance progression for one ``vector`` (no
+                    notes needed): how to push it untested → confirmed.
 
     Filters (``vector``, ``target``, ``stance``, ``keyword``, ``min_confidence``)
     apply in ``list`` mode; ``target``/``min_confidence`` also scope the pivots.
@@ -166,8 +169,18 @@ async def note_query(
         return {**meta, "by_vector": store.by_vector(target=target or None, min_confidence=min_confidence)}
     if mode == "coverage":
         return {**meta, "coverage": store.coverage(target=target or None)}
+    if mode == "playbook":
+        if not vector:
+            return {"error": "playbook mode requires a 'vector'", "valid_vectors": _valid_values(AttackVector)}
+        try:
+            AttackVector(vector.lower())
+        except ValueError:
+            return {"error": f"unknown vector '{vector}'", "valid_vectors": _valid_values(AttackVector)}
+        vec = vector.lower()
+        ladder = {s.value: next_action_for(vec, s) for s in VectorStance}
+        return {**meta, "vector": vec, "playbook": ladder}
     if mode != "list":
-        return {"error": f"unknown mode '{mode}'", "valid_modes": ["list", "by_vector", "board", "coverage"]}
+        return {"error": f"unknown mode '{mode}'", "valid_modes": ["list", "by_vector", "board", "coverage", "playbook"]}
 
     # Validate optional enum filters before querying.
     if vector:

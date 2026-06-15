@@ -14,7 +14,9 @@ from kambo.notes import (
     NotesStore,
     VectorStance,
     get_notes_store,
+    next_action_for,
 )
+from kambo.notes_playbooks import PLAYBOOKS, playbook_action
 
 
 def _ts(offset_seconds: int = 0) -> str:
@@ -209,12 +211,21 @@ class TestBoard:
         assert board[0]["vector"] == "xss"
         assert board[0]["active"] is True
 
-    def test_next_action_hint_present(self, tmp_path: Path) -> None:
+    def test_next_action_is_vector_specific(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
         store.add(Note(vector=AttackVector.IDOR, target="example.com", observation="o",
                        stance=VectorStance.UNTESTED))
         row = store.board()[0]
-        assert "probe this vector" in row["next_action"]
+        # IDOR untested → the playbook step, not the generic stance hint.
+        assert "object id" in row["next_action"]
+        assert "probe this vector" not in row["next_action"]
+
+    def test_next_action_falls_back_to_generic(self, tmp_path: Path) -> None:
+        store = self._store(tmp_path)
+        # RECON has no playbook → generic hint.
+        store.add(Note(vector=AttackVector.RECON, target="example.com", observation="o",
+                       stance=VectorStance.UNTESTED))
+        assert "probe this vector" in store.board()[0]["next_action"]
 
     def test_confirmed_ranks_above_ruled_out(self, tmp_path: Path) -> None:
         store = self._store(tmp_path)
@@ -224,6 +235,32 @@ class TestBoard:
                        stance=VectorStance.CONFIRMED, confidence=5))
         order = [r["vector"] for r in store.board()]
         assert order.index("idor") < order.index("sqli")
+
+
+class TestPlaybooks:
+    def test_catalog_keys_are_valid(self) -> None:
+        valid_vectors = {v.value for v in AttackVector}
+        valid_stances = {s.value for s in VectorStance}
+        for vec, ladder in PLAYBOOKS.items():
+            assert vec in valid_vectors, f"unknown vector key: {vec}"
+            for stance, action in ladder.items():
+                assert stance in valid_stances, f"unknown stance key: {stance}"
+                assert action.strip(), f"empty action for {vec}/{stance}"
+
+    def test_playbook_action_hit(self) -> None:
+        assert "object id" in playbook_action("idor", "untested")
+
+    def test_playbook_action_miss_returns_none(self) -> None:
+        assert playbook_action("recon", "untested") is None
+        assert playbook_action("idor", "confirmed") is None  # not authored → generic
+
+    def test_next_action_for_uses_playbook(self) -> None:
+        assert next_action_for("ssrf", VectorStance.UNTESTED) == playbook_action("ssrf", "untested")
+
+    def test_next_action_for_falls_back(self) -> None:
+        # confirmed isn't authored per-vector → generic non-empty hint.
+        action = next_action_for("idor", VectorStance.CONFIRMED)
+        assert action and "object id" not in action
 
 
 class TestCoverage:

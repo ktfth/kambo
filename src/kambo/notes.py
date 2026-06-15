@@ -25,6 +25,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field
 
+from kambo.notes_playbooks import playbook_action
+
 
 class AttackVector(str, Enum):
     """Canonical attack vectors — aligned with the validators in
@@ -100,7 +102,7 @@ _STANCE_RANK: dict[VectorStance, int] = {
 # Stances worth working on next — promising and in-flight.
 _ACTIVE_STANCES = {VectorStance.SUSPECTED, VectorStance.PROBING}
 
-# What to do next, by stance — surfaced on the vector board.
+# Generic fallback hint by stance — used when no vector-specific playbook applies.
 _NEXT_ACTION: dict[VectorStance, str] = {
     VectorStance.UNTESTED: "probe this vector — no testing recorded yet",
     VectorStance.SUSPECTED: "gather corroborating signals to confirm or rule out",
@@ -108,6 +110,13 @@ _NEXT_ACTION: dict[VectorStance, str] = {
     VectorStance.CONFIRMED: "document evidence and move toward a report",
     VectorStance.RULED_OUT: "closed — revisit only if new information appears",
 }
+
+
+def next_action_for(vector: str, stance: VectorStance) -> str:
+    """The next experiment to advance ``vector`` from ``stance`` — the
+    vector-specific playbook step when one exists, else the generic hint.
+    Public so the tool layer can build a full playbook ladder for a vector."""
+    return playbook_action(vector, stance.value) or _NEXT_ACTION[stance]
 
 
 class Note(BaseModel):
@@ -288,7 +297,7 @@ class NotesStore:
             rows.append({
                 **s,
                 "active": stance in _ACTIVE_STANCES,
-                "next_action": _NEXT_ACTION[stance],
+                "next_action": next_action_for(s["vector"], stance),
             })
 
         # Staged stable sorts (last key applied first wins ties): newest first,
