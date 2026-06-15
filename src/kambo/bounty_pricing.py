@@ -152,6 +152,17 @@ class ProgramPayouts(BaseModel):
     managed: bool = False
 
 
+def acceptance_rate(vuln_type: str, default: float = 0.5) -> float:
+    """Historical acceptance probability for a vuln type (0.0-1.0).
+
+    Public accessor over the internal table so other modules (e.g. the notes
+    board's ROI scoring) can reuse it without reaching into a private dict.
+    Unknown types return ``default``.
+    """
+    key = vuln_type.lower().replace(" ", "_").replace("-", "_")
+    return _VULN_ACCEPTANCE_RATES.get(key, default)
+
+
 def estimate_finding_value(
     title: str,
     severity: Severity,

@@ -163,6 +163,41 @@ class TestNoteQuery:
         assert res["session_total"] == 0
 
 
+class TestBoardROI:
+    async def test_board_rows_have_roi(self) -> None:
+        await note_add("sqli", "example.com", "x", stance="probing", confidence=9)
+        row = (await note_query(mode="board"))["board"][0]
+        assert "roi" in row
+        assert set(row["roi"].keys()) == {"acceptance", "stance_weight", "priority_score"}
+        assert 0 <= row["roi"]["priority_score"] <= 100
+
+    async def test_ruled_out_scores_zero(self) -> None:
+        await note_add("sqli", "example.com", "x", stance="ruled_out", confidence=9)
+        row = (await note_query(mode="board"))["board"][0]
+        assert row["roi"]["priority_score"] == 0
+
+    async def test_order_roi_reranks_vs_attention(self) -> None:
+        # rce untested @10 has high ROI but is not "active";
+        # open_redirect probing @2 is active but low ROI.
+        await note_add("rce", "example.com", "high upside", stance="untested", confidence=10)
+        await note_add("open_redirect", "example.com", "weak lead", stance="probing", confidence=2)
+
+        attention = await note_query(mode="board")  # default order
+        assert attention["order"] == "attention"
+        assert attention["board"][0]["vector"] == "open_redirect"  # active leads
+
+        roi = await note_query(mode="board", order="roi")
+        assert roi["order"] == "roi"
+        assert roi["board"][0]["vector"] == "rce"  # highest priority_score leads
+
+    async def test_advisory_vector_gets_score(self) -> None:
+        # graphql has no pricing-table entry → advisory acceptance still applies.
+        await note_add("graphql", "example.com", "introspection open", stance="suspected", confidence=8)
+        row = (await note_query(mode="board"))["board"][0]
+        assert row["roi"]["acceptance"] == 0.7
+        assert row["roi"]["priority_score"] > 0
+
+
 class TestNotePromote:
     async def test_promote_confirmed_note(self) -> None:
         await note_add(

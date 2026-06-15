@@ -7,10 +7,23 @@ import pytest
 from kambo.bounty_pricing import (
     ProgramPayouts,
     ReportReadiness,
+    acceptance_rate,
     estimate_finding_value,
     estimate_session_value,
 )
 from kambo.models import Confidence, Severity
+
+
+class TestAcceptanceRate:
+    def test_known_type(self) -> None:
+        assert acceptance_rate("sqli") == 0.95
+
+    def test_normalizes_separators(self) -> None:
+        assert acceptance_rate("open redirect") == acceptance_rate("open-redirect")
+
+    def test_unknown_type_returns_default(self) -> None:
+        assert acceptance_rate("totally_made_up") == 0.5
+        assert acceptance_rate("totally_made_up", default=0.1) == 0.1
 
 
 # ---------------------------------------------------------------------------

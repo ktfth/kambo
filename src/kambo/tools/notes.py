@@ -15,6 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from kambo.bounty_pricing import acceptance_rate
 from kambo.models import Confidence, EvidenceChain, Severity
 from kambo.notes import (
     AttackVector,
@@ -25,6 +26,48 @@ from kambo.notes import (
     stance_rank,
 )
 from kambo.tools import reporting
+
+# AttackVector value -> bounty_pricing acceptance-table key (where one exists).
+_VECTOR_PRICING_KEY: dict[str, str] = {
+    "sqli": "sqli", "rce": "rce", "ssrf": "ssrf", "idor": "idor", "bola": "bola",
+    "access_control": "bfla", "jwt": "jwt", "ssti": "ssti", "lfi": "path_traversal",
+    "xxe": "xxe", "deserialization": "insecure_deserialization",
+    "prototype_pollution": "prototype_pollution", "xss": "xss", "cors": "cors",
+    "csrf": "csrf", "open_redirect": "open_redirect", "auth": "auth_bypass",
+    "secrets": "credential_exposure", "info_disclosure": "information_disclosure",
+    "misconfig": "misconfig", "subdomain_takeover": "subdomain_takeover",
+}
+
+# Advisory acceptance for vectors with no entry in the pricing table.
+_VECTOR_ADVISORY_ACCEPTANCE: dict[str, float] = {
+    "business_logic": 0.80, "race": 0.75, "graphql": 0.70,
+    "recon": 0.10, "other": 0.30,
+}
+
+# How much pushing a vector at this stance is worth — rewards promising,
+# in-flight work; a confirmed vector is already realized (little left to
+# "advance"), a ruled-out one is dead.
+_STANCE_ADVANCE_WEIGHT: dict[str, float] = {
+    "suspected": 1.0, "probing": 1.0, "untested": 0.6,
+    "confirmed": 0.2, "ruled_out": 0.0,
+}
+
+
+def _vector_acceptance(vector: str) -> float:
+    key = _VECTOR_PRICING_KEY.get(vector)
+    if key:
+        return acceptance_rate(key)
+    return _VECTOR_ADVISORY_ACCEPTANCE.get(vector, 0.5)
+
+
+def _roi_for(vector: str, stance: str, confidence: int) -> dict[str, Any]:
+    """A self-contained, config-free priority score for *advancing* a vector:
+    acceptance (pays off if real) × operator confidence × how-worth-pushing.
+    Relative 0-100 — no program payout needed, so it stays per-session."""
+    acc = _vector_acceptance(vector)
+    weight = _STANCE_ADVANCE_WEIGHT.get(stance, 0.5)
+    score = round(acc * (max(1, min(10, confidence)) / 10) * weight * 100)
+    return {"acceptance": round(acc, 2), "stance_weight": weight, "priority_score": score}
 
 # Evidence-chain confidence → the strongest stance that evidence justifies.
 # A note may never claim a stronger stance than its evidence supports; a stance
@@ -148,13 +191,16 @@ async def note_query(
     keyword: str = "",
     min_confidence: int = 1,
     limit: int = 50,
+    order: str = "attention",
 ) -> dict[str, Any]:
     """Read the per-session notes through an attack-vector lens.
 
     Modes:
         list      — flat filtered notes, newest first.
         by_vector — pivot: one summary per vector (count, strongest stance, targets).
-        board     — progress board, attention-ordered, with vector-specific next steps.
+        board     — progress board, with vector-specific next steps and an ROI
+                    priority score per row. ``order`` = "attention" (default) or
+                    "roi" (rank by expected value of advancing).
         coverage  — blind-spot view: touched vs untouched vectors.
         playbook  — the full stance-by-stance progression for one ``vector`` (no
                     notes needed): how to push it untested → confirmed.
@@ -166,7 +212,12 @@ async def note_query(
     meta = {"ephemeral": store.is_ephemeral, "session_total": store.count(), "mode": mode}
 
     if mode == "board":
-        return {**meta, "board": store.board(target=target or None)}
+        rows = store.board(target=target or None)
+        for r in rows:
+            r["roi"] = _roi_for(r["vector"], r["stance"], r["max_confidence"])
+        if order == "roi":
+            rows.sort(key=lambda r: r["roi"]["priority_score"], reverse=True)
+        return {**meta, "order": order, "board": rows}
     if mode == "by_vector":
         return {**meta, "by_vector": store.by_vector(target=target or None, min_confidence=min_confidence)}
     if mode == "coverage":

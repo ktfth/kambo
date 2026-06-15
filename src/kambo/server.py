@@ -96,11 +96,13 @@ _TOOL_REGISTRY: dict[str, _ToolEntry] = {
                           "keyword": {"type": "string", "description": "Substring match on observation (list mode)"},
                           "min_confidence": {"type": "integer", "description": "Minimum confidence (default 1)"},
                           "limit": {"type": "integer", "description": "Max notes in list mode (default 50)"},
+                          "order": {"type": "string", "enum": ["attention", "roi"], "description": "board mode ordering — attention (default) or roi (priority score)"},
                       },
                   }),
         dispatch=lambda a: notes.note_query(
             a.get("mode", "list"), a.get("vector", ""), a.get("target", ""),
-            a.get("stance", ""), a.get("keyword", ""), a.get("min_confidence", 1), a.get("limit", 50),
+            a.get("stance", ""), a.get("keyword", ""), a.get("min_confidence", 1),
+            a.get("limit", 50), a.get("order", "attention"),
         ),
     ),
     "note_promote": _ToolEntry(
