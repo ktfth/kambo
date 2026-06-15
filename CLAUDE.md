@@ -48,6 +48,7 @@ When the user's request matches an available skill, invoke it via the Skill tool
 | Chain exploits, multi-step, combine findings, escalate impact, attack chain | `/kambo-chain` |
 | Race condition, TOCTOU, concurrent requests, double spend, timing attack | `/kambo-race` |
 | GraphQL, introspection, query batching, nested queries, graphql security | `/kambo-graphql` |
+| Take a note, vector notes, what to work on next, blind spots, coverage, notes board, promote note | `/kambo-notes` |
 | Post social, publicar Threads, post do dia, divulgar kambo | `/kambo-social` |
 
 ## Self-Improvement Loop
