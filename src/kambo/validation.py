@@ -2185,3 +2185,255 @@ def validate_race_condition(
         )
 
     return chain
+
+
+# ---------------------------------------------------------------------------
+# validate_oauth — OAuth 2.0 / SAML authentication flaws
+# ---------------------------------------------------------------------------
+
+# Patterns that confirm a redirect_uri was accepted (open redirect / token theft)
+_OAUTH_REDIRECT_ACCEPTED = [
+    r"code=[\w\-]+",          # authorization code in redirect
+    r"access_token=[\w\-]+",  # implicit flow token in redirect
+    r"token_type=bearer",
+    r"302\s+Found",
+    r"Location:\s*http",
+]
+
+# Patterns signaling the server rejected the manipulated redirect_uri
+_OAUTH_REDIRECT_REJECTED = [
+    r"redirect_uri.*mismatch",
+    r"invalid.*redirect",
+    r"redirect.*not.*allowed",
+    r"redirect.*not.*registered",
+    r"400\s+Bad Request",
+    r"error=.*redirect",
+]
+
+# Patterns indicating an authorization code was reused successfully
+_OAUTH_CODE_REUSE_SUCCESS = [
+    r"access_token",
+    r"\"token_type\"",
+    r"200\s+OK",
+]
+
+# Patterns indicating server properly rejected code reuse
+_OAUTH_CODE_REUSE_REJECTED = [
+    r"invalid_grant",
+    r"code.*already.*used",
+    r"authorization.*code.*expired",
+    r"error.*invalid_grant",
+]
+
+# Signals that excess scopes were granted without approval
+_OAUTH_SCOPE_BYPASS = [
+    r"\"scope\":\s*\"[^\"]*admin",
+    r"\"scope\":\s*\"[^\"]*write",
+    r"scope.*granted.*exceeds",
+    r"access_token.*admin",
+]
+
+# SAML signature wrapping / comment injection patterns
+_SAML_WRAPPING_SIGNALS = [
+    r"SignatureValue",
+    r"<!--",                  # XML comment injection
+    r"ds:Signature",
+    r"samlp:Response",
+]
+
+
+def validate_oauth(
+    flow_type: str,
+    auth_response: str,
+    *,
+    state_present: bool = True,
+    state_validated: bool = True,
+    redirect_uri_test: str = "",
+    pkce_used: bool = True,
+    pkce_validated: bool = True,
+    code_reuse_response: str = "",
+    token_in_url: bool = False,
+    scope_test: str = "",
+    saml_response: str = "",
+    baseline_auth_response: str = "",
+) -> EvidenceChain:
+    """Validate OAuth 2.0 / SAML authentication flow vulnerabilities.
+
+    Covers: missing state (CSRF), open redirect via redirect_uri, implicit-flow
+    token leakage, missing/unenforced PKCE, authorization code reuse, scope bypass,
+    and SAML signature wrapping.
+
+    Args:
+        flow_type: "implicit", "code", "hybrid", "device", or "client_credentials"
+        auth_response: Full auth server response (headers + body) from the initial flow
+        state_present: Whether the client included a state parameter in the auth request
+        state_validated: Whether the server validated state on the callback
+        redirect_uri_test: Response to testing redirect_uri manipulation (e.g., pointing
+                           to an attacker domain)
+        pkce_used: Whether PKCE (code_challenge) was included in the code flow request
+        pkce_validated: Whether the server rejected a code exchange without code_verifier
+        code_reuse_response: Server response to resubmitting an already-used auth code
+        token_in_url: Whether the access token appeared in the URL (implicit flow leakage)
+        scope_test: Server response when requesting scopes beyond what was authorized
+        saml_response: Raw SAML assertion (for SAML-based auth testing)
+        baseline_auth_response: Normal auth response for differential comparison
+    """
+    chain = EvidenceChain()
+
+    if not auth_response:
+        return chain.add_fp_check("No auth response provided — cannot validate OAuth flow")
+
+    # -------------------------------------------------------------------
+    # 1. Missing / unvalidated state parameter → OAuth CSRF
+    # -------------------------------------------------------------------
+    if not state_present:
+        chain = chain.add(
+            signal="OAuth flow lacks state parameter — CSRF attack on authorization flow is possible",
+            source="oauth_state_check",
+            weight=0.8,
+        )
+    elif not state_validated:
+        chain = chain.add(
+            signal="State parameter present but server accepted callback without validating it — CSRF protection is decorative",
+            source="oauth_state_validation",
+            weight=1.0,
+        )
+
+    # -------------------------------------------------------------------
+    # 2. Open redirect via unvalidated redirect_uri → authorization code / token theft
+    # -------------------------------------------------------------------
+    if redirect_uri_test:
+        redirect_accepted = any(
+            re.search(p, redirect_uri_test, re.IGNORECASE)
+            for p in _OAUTH_REDIRECT_ACCEPTED
+        )
+        redirect_rejected = any(
+            re.search(p, redirect_uri_test, re.IGNORECASE)
+            for p in _OAUTH_REDIRECT_REJECTED
+        )
+
+        if redirect_accepted and not redirect_rejected:
+            chain = chain.add(
+                signal=f"redirect_uri manipulation accepted — attacker can steal authorization {'code' if flow_type == 'code' else 'token'} via open redirect",
+                source="oauth_redirect_uri_test",
+                weight=1.5,
+            )
+            # Causality confirmed: server accepted our crafted URI
+        elif redirect_rejected:
+            chain = chain.add_fp_check(
+                "Server correctly rejected manipulated redirect_uri — redirect_uri validation is enforced"
+            )
+
+    # -------------------------------------------------------------------
+    # 3. Implicit flow token in URL → token leakage via Referer / logs
+    # -------------------------------------------------------------------
+    if flow_type == "implicit" and token_in_url:
+        chain = chain.add(
+            signal="Implicit flow places access_token in URL fragment — token leaks via Referer headers, browser history, and server logs",
+            source="oauth_implicit_token_leak",
+            weight=1.0,
+        )
+        # Cap at FIRM — implicit flow is deprecated (RFC 9700) but URL leakage
+        # requires an attacker-controlled page to read the fragment
+        chain = chain.cap(
+            Confidence.FIRM,
+            "Implicit flow token leakage is a design weakness, not direct exploitation — "
+            "CONFIRMED requires demonstrated token exfiltration via Referer or log access",
+        )
+
+    # -------------------------------------------------------------------
+    # 4. Missing / unenforced PKCE on code flow → authorization code interception
+    # -------------------------------------------------------------------
+    if flow_type in ("code", "hybrid"):
+        if not pkce_used:
+            chain = chain.add(
+                signal="Authorization code flow lacks PKCE (code_challenge) — code interception attack is possible for public clients",
+                source="oauth_pkce_missing",
+                weight=0.5,
+            )
+        elif not pkce_validated:
+            chain = chain.add(
+                signal="PKCE code_challenge sent but server accepted token exchange without code_verifier — PKCE enforcement is decorative",
+                source="oauth_pkce_bypass",
+                weight=1.2,
+            )
+
+    # -------------------------------------------------------------------
+    # 5. Authorization code reuse → double-spend / session fixation
+    # -------------------------------------------------------------------
+    if code_reuse_response:
+        reuse_succeeded = any(
+            re.search(p, code_reuse_response, re.IGNORECASE)
+            for p in _OAUTH_CODE_REUSE_SUCCESS
+        )
+        reuse_rejected = any(
+            re.search(p, code_reuse_response, re.IGNORECASE)
+            for p in _OAUTH_CODE_REUSE_REJECTED
+        )
+
+        if reuse_succeeded and not reuse_rejected:
+            chain = chain.add(
+                signal="Authorization code accepted on second use — codes are not invalidated after exchange (double-spend risk)",
+                source="oauth_code_reuse",
+                weight=1.5,
+            )
+        elif reuse_rejected:
+            chain = chain.add_fp_check(
+                "Server correctly rejected reused authorization code — single-use enforcement is working"
+            )
+
+    # -------------------------------------------------------------------
+    # 6. Scope bypass → privilege escalation
+    # -------------------------------------------------------------------
+    if scope_test:
+        scope_elevated = any(
+            re.search(p, scope_test, re.IGNORECASE)
+            for p in _OAUTH_SCOPE_BYPASS
+        )
+        has_differential = bool(baseline_auth_response) and scope_test != baseline_auth_response
+
+        if scope_elevated:
+            chain = chain.add(
+                signal="Server granted scopes exceeding what was authorized — privilege escalation via scope inflation",
+                source="oauth_scope_bypass",
+                weight=1.0,
+            )
+            chain = cap_single_response_reflexive(
+                chain, "oauth_scope_bypass", has_differential=has_differential
+            )
+
+    # -------------------------------------------------------------------
+    # 7. SAML signature wrapping / XML comment injection
+    # -------------------------------------------------------------------
+    if saml_response:
+        wrapping_signals = sum(
+            1 for p in _SAML_WRAPPING_SIGNALS
+            if re.search(p, saml_response, re.IGNORECASE)
+        )
+
+        xml_comment = "<!--" in saml_response
+        # Count opening tags only — closing tags (</ds:Signature>) would double-count
+        sig_elements = len(re.findall(r"<ds:Signature[\s>]", saml_response))
+        sig_values = len(re.findall(r"<SignatureValue[\s>]", saml_response))
+        has_multiple_signatures = sig_elements > 1 or sig_values > 1
+
+        if has_multiple_signatures:
+            chain = chain.add(
+                signal="SAML response contains multiple Signature elements — potential XML signature wrapping (XSW) attack vector",
+                source="saml_signature_wrapping",
+                weight=1.2,
+            )
+        if xml_comment:
+            chain = chain.add(
+                signal="XML comment in SAML assertion — comment injection can break signature validation in vulnerable parsers",
+                source="saml_comment_injection",
+                weight=0.8,
+            )
+        elif wrapping_signals >= 2 and not has_multiple_signatures:
+            chain = chain.add(
+                signal=f"SAML response has {wrapping_signals} structural signals — review for assertion manipulation",
+                source="saml_structure_analysis",
+                weight=0.4,
+            )
+
+    return chain
