@@ -30,7 +30,7 @@ from kambo.resources.findings_resource import get_findings_data
 from kambo.resources.scope_resource import get_scope_data
 from kambo.resources.session_resource import get_session_data
 from kambo.scope import get_scope_manager
-from kambo.tools import recon, scanning, vulns, exploit, post_exploit, reporting, api_security, cloud, containers, ad, bounty, platforms
+from kambo.tools import recon, scanning, vulns, exploit, post_exploit, reporting, api_security, cloud, containers, ad, bounty, platforms, notes
 
 # Create the MCP server
 server = Server("kambo")
@@ -58,6 +58,51 @@ class _ToolEntry:
 # Legacy tools remain in list_tools() / _dispatch_tool() for compatibility
 # and can be migrated into this registry incrementally.
 _TOOL_REGISTRY: dict[str, _ToolEntry] = {
+    # ── notes (per-session, vector-indexed engagement memory) ─────────────
+    "note_add": _ToolEntry(
+        tool=Tool(name="note_add",
+                  description="Record a vector-tagged engagement observation (per-session, ephemeral — nothing persists unless KAMBO_NOTES_PATH is set). Stance is evidence-backed: evidence_signals cap how strong a stance you may claim.",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "vector": {"type": "string", "enum": [v.value for v in notes.AttackVector], "description": "Attack vector this note is about"},
+                          "target": {"type": "string", "description": "Asset/endpoint the note concerns"},
+                          "observation": {"type": "string", "description": "The note text"},
+                          "stance": {"type": "string", "enum": [s.value for s in notes.VectorStance], "description": "How far this vector is pushed (default untested)"},
+                          "confidence": {"type": "integer", "description": "1-10 gut feel this vector pays off on this target"},
+                          "tags": {"type": "array", "items": {"type": "string"}},
+                          "refs": {"type": "array", "items": {"type": "string"}, "description": "Finding ids, URLs, ticket links"},
+                          "note_id": {"type": "string", "description": "Stable id; reuse to progress the same note (latest wins)"},
+                          "evidence_signals": {"type": "array", "items": {"type": "object"}, "description": "[{signal, source, raw_data, weight}] backing the stance"},
+                      },
+                      "required": ["vector", "target", "observation"],
+                  }),
+        dispatch=lambda a: notes.note_add(
+            a["vector"], a["target"], a["observation"],
+            a.get("stance", "untested"), a.get("confidence", 5),
+            a.get("tags"), a.get("refs"), a.get("note_id", ""), a.get("evidence_signals"),
+        ),
+    ),
+    "note_query": _ToolEntry(
+        tool=Tool(name="note_query",
+                  description="Query per-session notes through an attack-vector lens — modes: list | by_vector (pivot) | board (progress + next actions) | coverage (blind spots).",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "mode": {"type": "string", "enum": ["list", "by_vector", "board", "coverage"], "description": "View to return (default list)"},
+                          "vector": {"type": "string", "description": "Filter by vector (list mode)"},
+                          "target": {"type": "string", "description": "Filter/scope by target substring"},
+                          "stance": {"type": "string", "description": "Filter by stance (list mode)"},
+                          "keyword": {"type": "string", "description": "Substring match on observation (list mode)"},
+                          "min_confidence": {"type": "integer", "description": "Minimum confidence (default 1)"},
+                          "limit": {"type": "integer", "description": "Max notes in list mode (default 50)"},
+                      },
+                  }),
+        dispatch=lambda a: notes.note_query(
+            a.get("mode", "list"), a.get("vector", ""), a.get("target", ""),
+            a.get("stance", ""), a.get("keyword", ""), a.get("min_confidence", 1), a.get("limit", 50),
+        ),
+    ),
     # ── vuln ──────────────────────────────────────────────────────────────
     "vuln_ssti": _ToolEntry(
         tool=Tool(name="vuln_ssti",

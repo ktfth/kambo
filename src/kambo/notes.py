@@ -120,6 +120,7 @@ class Note(BaseModel):
     confidence: int = 5  # 1-10, operator's gut feel this vector pays off here
     tags: list[str] = Field(default_factory=list)
     refs: list[str] = Field(default_factory=list)  # finding ids, URLs, ticket links
+    evidence: dict[str, Any] = Field(default_factory=dict)  # chain summary backing the stance
     source: str = "operator"  # operator, tool, inferred
     id: str = ""  # optional stable id; same id => update (latest wins at query)
     timestamp: str = Field(
@@ -127,6 +128,13 @@ class Note(BaseModel):
     )
 
     model_config = {"frozen": True}
+
+
+def stance_rank(stance: VectorStance) -> int:
+    """Progress rank of a stance (higher = stronger outcome reached). Public
+    accessor for the internal ordering so callers can compare stances without
+    reaching into a private table."""
+    return _STANCE_RANK[stance]
 
 
 class NotesStore:
