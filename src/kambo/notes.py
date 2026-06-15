@@ -130,6 +130,7 @@ class Note(BaseModel):
     tags: list[str] = Field(default_factory=list)
     refs: list[str] = Field(default_factory=list)  # finding ids, URLs, ticket links
     evidence: dict[str, Any] = Field(default_factory=dict)  # chain summary backing the stance
+    evidence_signals: list[dict[str, Any]] = Field(default_factory=list)  # raw signals for faithful promotion
     source: str = "operator"  # operator, tool, inferred
     id: str = ""  # optional stable id; same id => update (latest wins at query)
     timestamp: str = Field(
@@ -328,6 +329,16 @@ class NotesStore:
             "confirmed": confirmed,
             "coverage_pct": round(100 * len(touched) / len(all_vectors)),
         }
+
+    def get(self, note_id: str) -> Note | None:
+        """Return the current (deduplicated) note with ``note_id``, or None.
+        Empty/journal notes are not addressable."""
+        if not note_id:
+            return None
+        for n in self._effective():
+            if n.id == note_id:
+                return n
+        return None
 
     def count(self) -> int:
         self._ensure_loaded()

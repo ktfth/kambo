@@ -293,6 +293,25 @@ class TestCoverage:
         assert cov["coverage_pct"] == expected
 
 
+class TestGet:
+    def test_get_returns_latest_for_id(self) -> None:
+        store = NotesStore()
+        store.add(Note(vector=AttackVector.IDOR, target="example.com", observation="old",
+                       id="g1", stance=VectorStance.SUSPECTED))
+        store.add(Note(vector=AttackVector.IDOR, target="example.com", observation="new",
+                       id="g1", stance=VectorStance.CONFIRMED))
+        got = store.get("g1")
+        assert got is not None and got.stance is VectorStance.CONFIRMED
+
+    def test_get_missing_returns_none(self) -> None:
+        assert NotesStore().get("nope") is None
+
+    def test_get_empty_id_returns_none(self) -> None:
+        store = NotesStore()
+        store.add(Note(vector=AttackVector.IDOR, target="example.com", observation="journal"))
+        assert store.get("") is None
+
+
 class TestPersistence:
     def test_persists_across_instances(self, tmp_path: Path) -> None:
         path = tmp_path / "notes.jsonl"

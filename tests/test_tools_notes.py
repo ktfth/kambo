@@ -4,9 +4,18 @@ from __future__ import annotations
 
 import pytest
 
+from unittest.mock import AsyncMock, patch
+
 import kambo.notes as notes_module
 from kambo.notes import VectorStance
-from kambo.tools.notes import note_add, note_query
+from kambo.tools.notes import note_add, note_promote, note_query
+
+
+def _mock_findings_db():
+    """AsyncMock DB that report_finding can write to without touching disk."""
+    mock_db = AsyncMock()
+    mock_db.get_findings.return_value = []
+    return mock_db
 
 
 @pytest.fixture(autouse=True)
@@ -152,3 +161,64 @@ class TestNoteQuery:
         res = await note_query(mode="list")
         assert res["count"] == 0
         assert res["session_total"] == 0
+
+
+class TestNotePromote:
+    async def test_promote_confirmed_note(self) -> None:
+        await note_add(
+            "sqli", "api.example.com", "extracted db version via UNION",
+            stance="confirmed", note_id="p1",
+            evidence_signals=[
+                {"signal": "UNION reflected", "source": "manual", "weight": 1.0},
+                {"signal": "version() in response", "source": "manual", "weight": 1.0},
+            ],
+        )
+        mock_db = _mock_findings_db()
+        with patch("kambo.tools.reporting.get_database", return_value=mock_db):
+            res = await note_promote("p1", "high", impact="cross-account data read")
+        assert res["status"] == "promoted"
+        assert res["from_note"] == "p1"
+        assert res["finding_confidence"] == "confirmed"
+        assert res["finding"]["id"] == "FIND-001"
+        assert res["finding"]["finding"]["target"] == "api.example.com"
+        mock_db.save_finding.assert_awaited_once()
+
+    async def test_promote_unknown_note_errors(self) -> None:
+        res = await note_promote("ghost", "high")
+        assert "error" in res and "no note" in res["error"]
+
+    async def test_promote_unconfirmed_blocked(self) -> None:
+        await note_add("xss", "example.com", "maybe", stance="suspected", note_id="p2")
+        res = await note_promote("p2", "medium")
+        assert "error" in res and "not 'confirmed'" in res["error"]
+
+    async def test_promote_unconfirmed_with_override(self) -> None:
+        await note_add("xss", "example.com", "lead", stance="suspected", note_id="p3")
+        mock_db = _mock_findings_db()
+        with patch("kambo.tools.reporting.get_database", return_value=mock_db):
+            res = await note_promote("p3", "low", allow_unconfirmed=True)
+        assert res["status"] == "promoted"
+        # No evidence signals → honest confidence is tentative.
+        assert res["finding_confidence"] == "tentative"
+
+    async def test_confirmed_hunch_promotes_as_tentative(self) -> None:
+        # 'confirmed' stance recorded without evidence (a hunch) is honestly
+        # downgraded to a TENTATIVE finding.
+        await note_add("ssrf", "example.com", "gut feeling", stance="confirmed", note_id="p4")
+        mock_db = _mock_findings_db()
+        with patch("kambo.tools.reporting.get_database", return_value=mock_db):
+            res = await note_promote("p4", "high")
+        assert res["status"] == "promoted"
+        assert res["finding_confidence"] == "tentative"
+
+    async def test_promote_invalid_severity_errors(self) -> None:
+        await note_add("idor", "example.com", "x", stance="confirmed", note_id="p5")
+        res = await note_promote("p5", "catastrophic")
+        assert "error" in res and "severity" in res["error"]
+
+    async def test_promote_default_title_from_vector(self) -> None:
+        await note_add("idor", "api.example.com", "x", stance="confirmed", note_id="p6")
+        mock_db = _mock_findings_db()
+        with patch("kambo.tools.reporting.get_database", return_value=mock_db):
+            res = await note_promote("p6", "high")
+        assert res["finding"]["finding"]["title"] == "IDOR — api.example.com"

@@ -15,7 +15,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from kambo.models import Confidence, EvidenceChain
+from kambo.models import Confidence, EvidenceChain, Severity
 from kambo.notes import (
     AttackVector,
     Note,
@@ -24,6 +24,7 @@ from kambo.notes import (
     next_action_for,
     stance_rank,
 )
+from kambo.tools import reporting
 
 # Evidence-chain confidence → the strongest stance that evidence justifies.
 # A note may never claim a stronger stance than its evidence supports; a stance
@@ -123,6 +124,7 @@ async def note_add(
         tags=tags or [],
         refs=refs or [],
         evidence=evidence_summary,
+        evidence_signals=evidence_signals or [],
         id=note_id,
     )
     store = get_notes_store()
@@ -203,3 +205,79 @@ async def note_query(
         limit=limit,
     )
     return {**meta, "count": len(notes), "notes": notes}
+
+
+async def note_promote(
+    note_id: str,
+    severity: str,
+    title: str = "",
+    impact: str = "",
+    remediation: str = "",
+    cvss: float | None = None,
+    references: list[str] | None = None,
+    allow_unconfirmed: bool = False,
+) -> dict[str, Any]:
+    """Graduate a confirmed note into a reportable Finding.
+
+    Closes the loop observation → finding: rebuilds the note's evidence chain
+    and hands it to ``report_finding`` (which persists to the gitignored
+    findings workspace, never the repo). The Finding's confidence is derived
+    honestly from the rebuilt chain — a note with no evidence can never become
+    a CONFIRMED finding. The source note stays in the ephemeral session store.
+
+    Args:
+        note_id: stable id of the note to promote (set via note_add(note_id=...)).
+        severity: critical | high | medium | low | info.
+        title: finding title (default derived from vector + target).
+        impact: business/technical impact statement.
+        remediation: fix recommendation.
+        cvss: CVSS 3.1 score.
+        references: CWE/OWASP/URLs (default: the note's refs).
+        allow_unconfirmed: promote a note that is not yet at the 'confirmed' stance.
+    """
+    try:
+        Severity(severity.lower())
+    except ValueError:
+        return {"error": f"unknown severity '{severity}'", "valid_severities": _valid_values(Severity)}
+
+    store = get_notes_store()
+    note = store.get(note_id)
+    if note is None:
+        return {
+            "error": f"no note with id '{note_id}'",
+            "hint": "promotable notes need a stable id — record one via note_add(note_id=...)",
+        }
+
+    if note.stance != VectorStance.CONFIRMED and not allow_unconfirmed:
+        return {
+            "error": f"note stance is '{note.stance.value}', not 'confirmed'",
+            "hint": "advance the note to confirmed (with evidence) or pass allow_unconfirmed=true",
+        }
+
+    # Honest confidence: rebuild the chain from the note's raw signals. No
+    # signals → cannot claim better than tentative, regardless of stance.
+    chain = _build_chain(note.evidence_signals)
+    confidence = chain.confidence.value if note.evidence_signals else Confidence.TENTATIVE.value
+
+    finding = await reporting.report_finding(
+        title=title or f"{note.vector.value.upper()} — {note.target}",
+        severity=severity.lower(),
+        target=note.target,
+        description=note.observation,
+        confidence=confidence,
+        impact=impact,
+        remediation=remediation,
+        cvss=cvss,
+        references=references or note.refs,
+        tools_used=["kambo-notes"],
+        evidence_signals=note.evidence_signals,
+    )
+
+    return {
+        "status": "promoted",
+        "from_note": note_id,
+        "vector": note.vector.value,
+        "finding_confidence": confidence,
+        "note_remains_ephemeral": store.is_ephemeral,
+        "finding": finding,
+    }

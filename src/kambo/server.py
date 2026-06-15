@@ -103,6 +103,28 @@ _TOOL_REGISTRY: dict[str, _ToolEntry] = {
             a.get("stance", ""), a.get("keyword", ""), a.get("min_confidence", 1), a.get("limit", 50),
         ),
     ),
+    "note_promote": _ToolEntry(
+        tool=Tool(name="note_promote",
+                  description="Graduate a confirmed session note into a reportable Finding carrying its evidence chain (persists to the gitignored findings workspace). Confidence is derived honestly from the note's evidence.",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "note_id": {"type": "string", "description": "Stable id of the note to promote (set via note_add note_id)"},
+                          "severity": {"type": "string", "enum": ["critical", "high", "medium", "low", "info"]},
+                          "title": {"type": "string", "description": "Finding title (default: derived from vector + target)"},
+                          "impact": {"type": "string"},
+                          "remediation": {"type": "string"},
+                          "cvss": {"type": "number"},
+                          "references": {"type": "array", "items": {"type": "string"}},
+                          "allow_unconfirmed": {"type": "boolean", "description": "Promote a note not yet at the 'confirmed' stance"},
+                      },
+                      "required": ["note_id", "severity"],
+                  }),
+        dispatch=lambda a: notes.note_promote(
+            a["note_id"], a["severity"], a.get("title", ""), a.get("impact", ""),
+            a.get("remediation", ""), a.get("cvss"), a.get("references"), a.get("allow_unconfirmed", False),
+        ),
+    ),
     # ── vuln ──────────────────────────────────────────────────────────────
     "vuln_ssti": _ToolEntry(
         tool=Tool(name="vuln_ssti",
