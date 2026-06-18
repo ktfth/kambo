@@ -58,6 +58,89 @@ class _ToolEntry:
 # Legacy tools remain in list_tools() / _dispatch_tool() for compatibility
 # and can be migrated into this registry incrementally.
 _TOOL_REGISTRY: dict[str, _ToolEntry] = {
+    # ── vuln (new evidence-backed tools) ─────────────────────────────────
+    "vuln_path_traversal": _ToolEntry(
+        tool=Tool(name="vuln_path_traversal",
+                  description="Path traversal / LFI detection — tests ../../../../etc/passwd payloads and validates file content signatures",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "URL with potential path parameter"},
+                          "parameter": {"type": "string", "description": "Query parameter to inject into (default: file)"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_path_traversal(a["target"], a.get("parameter", "file")),
+    ),
+    "vuln_xxe": _ToolEntry(
+        tool=Tool(name="vuln_xxe",
+                  description="XML External Entity (XXE) injection — in-band file read and optional OOB via collaborator URL",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "URL that accepts XML input"},
+                          "parameter": {"type": "string", "description": "POST body parameter containing XML (empty = raw XML body)"},
+                          "callback_url": {"type": "string", "description": "OOB collaborator URL for blind XXE (e.g. xyz.oastify.com)"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_xxe(a["target"], a.get("parameter", ""), a.get("callback_url", "")),
+    ),
+    "vuln_csrf": _ToolEntry(
+        tool=Tool(name="vuln_csrf",
+                  description="CSRF assessment — checks for CSRF tokens, SameSite cookies, permissive CORS on state-changing endpoints",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Base URL of the target application"},
+                          "endpoint": {"type": "string", "description": "Specific endpoint/form to check"},
+                          "method": {"type": "string", "enum": ["GET", "POST", "PUT", "PATCH", "DELETE"], "description": "HTTP method the form uses (default: POST)"},
+                          "token": {"type": "string", "description": "Auth token to include in request"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_csrf(a["target"], a.get("endpoint", ""), a.get("method", "POST"), a.get("token", "")),
+    ),
+    "vuln_open_redirect": _ToolEntry(
+        tool=Tool(name="vuln_open_redirect",
+                  description="Open Redirect detection — injects external URLs into redirect parameters and follows 3xx chains",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "URL with a redirect parameter"},
+                          "parameter": {"type": "string", "description": "Query parameter controlling redirect destination (default: url)"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_open_redirect(a["target"], a.get("parameter", "url")),
+    ),
+    "vuln_prototype_pollution": _ToolEntry(
+        tool=Tool(name="vuln_prototype_pollution",
+                  description="Prototype Pollution detection — injects __proto__ and constructor.prototype keys into JSON POST bodies",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Base URL of the target application"},
+                          "endpoint": {"type": "string", "description": "API endpoint to inject into"},
+                          "token": {"type": "string", "description": "Auth token for authenticated endpoints"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_prototype_pollution(a["target"], a.get("endpoint", ""), a.get("token", "")),
+    ),
+    "vuln_graphql": _ToolEntry(
+        tool=Tool(name="vuln_graphql",
+                  description="GraphQL security assessment — introspection enabled, error verbosity, injection via field arguments",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "target": {"type": "string", "description": "Base URL of the application"},
+                          "endpoint": {"type": "string", "description": "GraphQL endpoint path (default: /graphql)"},
+                      },
+                      "required": ["target"],
+                  }),
+        dispatch=lambda a: vulns.vuln_graphql(a["target"], a.get("endpoint", "/graphql")),
+    ),
     # ── vuln ──────────────────────────────────────────────────────────────
     "vuln_ssti": _ToolEntry(
         tool=Tool(name="vuln_ssti",

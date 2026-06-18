@@ -54,6 +54,8 @@ _VULN_ACCEPTANCE_RATES: dict[str, float] = {
     "xxe": 0.83,
     "insecure_deserialization": 0.85,
     "prototype_pollution": 0.80,
+    "graphql": 0.78,
+    "deserialization": 0.85,      # alias for insecure_deserialization
 
     # Medium acceptance — sometimes disputed or downgraded
     "xss": 0.75,

@@ -110,3 +110,126 @@ class TestVulnJwt:
         with patch_runner({"vuln_jwt_analyze": "Algorithm: HS256", "vuln_jwt_crack": "no matches found"}):
             result = await vuln_jwt("http://example.com", "eyJhbGciOiJIUzI1NiJ9.test.sig")
         assert result["confidence"] == "tentative"
+
+
+class TestVulnPathTraversal:
+    @pytest.mark.asyncio
+    async def test_passwd_file_found(self) -> None:
+        from kambo.tools.vulns import vuln_path_traversal
+        output = "root:x:0:0:root:/root:/bin/bash\ndaemon:x:1:1:daemon:/usr/sbin:/usr/sbin/nologin"
+        with patch_runner({"vuln_path_traversal": output, "vuln_path_traversal_baseline": "normal page content"}):
+            result = await vuln_path_traversal("http://example.com/view", "file")
+        assert result["vulnerable"] is True
+        assert result["confidence"] in ("confirmed", "firm")
+
+    @pytest.mark.asyncio
+    async def test_no_traversal(self) -> None:
+        from kambo.tools.vulns import vuln_path_traversal
+        with patch_runner({"vuln_path_traversal": "404 Not Found", "vuln_path_traversal_baseline": "404 Not Found"}):
+            result = await vuln_path_traversal("http://example.com/view", "file")
+        assert result["vulnerable"] is False
+
+
+class TestVulnXxe:
+    @pytest.mark.asyncio
+    async def test_file_content_exfiltrated(self) -> None:
+        from kambo.tools.vulns import vuln_xxe
+        output = "root:x:0:0:root:/root:/bin/bash\n"
+        with patch_runner({"vuln_xxe": output, "vuln_xxe_baseline": "<root>ok</root>"}):
+            result = await vuln_xxe("http://example.com/parse")
+        assert result["vulnerable"] is True
+        assert result["confidence"] in ("confirmed", "firm")
+
+    @pytest.mark.asyncio
+    async def test_xxe_blocked(self) -> None:
+        from kambo.tools.vulns import vuln_xxe
+        output = "External entities are disabled"
+        with patch_runner({"vuln_xxe": output, "vuln_xxe_baseline": ""}):
+            result = await vuln_xxe("http://example.com/parse")
+        assert result["vulnerable"] is False
+
+
+class TestVulnCsrf:
+    @pytest.mark.asyncio
+    async def test_no_csrf_token_no_samesite(self) -> None:
+        from kambo.tools.vulns import vuln_csrf
+        headers = "HTTP/1.1 200 OK\r\nSet-Cookie: session=abc\r\n\r\n"
+        body = "<form method='post' action='/transfer'><input name='amount'></form>"
+        with patch_runner({"vuln_csrf": headers + body}):
+            result = await vuln_csrf("http://example.com", "/transfer")
+        assert result["has_csrf_token"] is False
+        assert result["samesite_cookie"] == ""
+        assert result["evidence"]["signal_count"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_csrf_token_present(self) -> None:
+        from kambo.tools.vulns import vuln_csrf
+        headers = "HTTP/1.1 200 OK\r\nSet-Cookie: session=abc; SameSite=Strict\r\n\r\n"
+        body = "<form><input name='csrf_token' value='abc123'></form>"
+        with patch_runner({"vuln_csrf": headers + body}):
+            result = await vuln_csrf("http://example.com")
+        assert result["has_csrf_token"] is True
+        assert result["evidence"]["signal_count"] == 0
+
+
+class TestVulnOpenRedirect:
+    @pytest.mark.asyncio
+    async def test_redirect_to_evil(self) -> None:
+        from kambo.tools.vulns import vuln_open_redirect
+        output = "HTTP/1.1 302 Found\r\nLocation: https://evil.com/\r\n\r\n"
+        with patch_runner({"vuln_open_redirect": output, "vuln_open_redirect_baseline": "HTTP/1.1 302 Found\r\nLocation: /home\r\n\r\n"}):
+            result = await vuln_open_redirect("http://example.com/redirect", "url")
+        assert result["vulnerable"] is True
+        assert result["confidence"] in ("confirmed", "firm")
+
+    @pytest.mark.asyncio
+    async def test_no_redirect(self) -> None:
+        from kambo.tools.vulns import vuln_open_redirect
+        with patch_runner({"vuln_open_redirect": "HTTP/1.1 200 OK\r\n\r\nOK", "vuln_open_redirect_baseline": ""}):
+            result = await vuln_open_redirect("http://example.com/redirect", "next")
+        assert result["vulnerable"] is False
+
+
+class TestVulnPrototypePollution:
+    @pytest.mark.asyncio
+    async def test_injected_value_reflected(self) -> None:
+        from kambo.tools.vulns import vuln_prototype_pollution
+        output = '{"id": 1, "polluted": "kambo_pp_canary_31337"}'
+        with patch_runner({"vuln_prototype_pollution": output, "vuln_pp_baseline": '{"id": 1}'}):
+            result = await vuln_prototype_pollution("http://example.com", "/api/user")
+        assert result["evidence"]["signal_count"] >= 1
+
+    @pytest.mark.asyncio
+    async def test_no_pollution(self) -> None:
+        from kambo.tools.vulns import vuln_prototype_pollution
+        with patch_runner({"vuln_prototype_pollution": '{"id": 1, "name": "test"}', "vuln_pp_baseline": '{"id": 1, "name": "test"}'}):
+            result = await vuln_prototype_pollution("http://example.com")
+        assert result["evidence"]["signal_count"] == 0
+
+
+class TestVulnGraphql:
+    @pytest.mark.asyncio
+    async def test_introspection_enabled(self) -> None:
+        from kambo.tools.vulns import vuln_graphql
+        intro_output = '{"data": {"__schema": {"queryType": {"name": "Query"}, "types": [{"name": "User"}, {"name": "Post"}], "directives": []}}}'
+        with patch_runner({
+            "vuln_graphql_baseline": '{"data": {"__typename": "Query"}}',
+            "vuln_graphql_introspection": intro_output,
+            "vuln_graphql_error": '{"errors": [{"message": "Cannot query field nonExistentField123"}]}',
+            "vuln_graphql_injection": '{"errors": [{"message": "syntax error"}]}',
+        }):
+            result = await vuln_graphql("http://example.com", "/graphql")
+        assert result["vulnerable"] is True
+        assert result["confidence"] in ("confirmed", "firm")
+
+    @pytest.mark.asyncio
+    async def test_graphql_not_exposed(self) -> None:
+        from kambo.tools.vulns import vuln_graphql
+        with patch_runner({
+            "vuln_graphql_baseline": "404 Not Found",
+            "vuln_graphql_introspection": "404 Not Found",
+            "vuln_graphql_error": "404 Not Found",
+            "vuln_graphql_injection": "404 Not Found",
+        }):
+            result = await vuln_graphql("http://example.com", "/graphql")
+        assert result["vulnerable"] is False

