@@ -1893,6 +1893,8 @@ def validate_deserialization(
     baseline_time_ms: float = 0,
     oob_hit: bool = False,
     oob_evidence: str = "",
+    *,
+    baseline_body: str = "",
 ) -> EvidenceChain:
     """Validate Insecure Deserialization findings.
 
@@ -1900,8 +1902,9 @@ def validate_deserialization(
     deserialization vulnerabilities.
 
     Causality (doctrine I1/I3): single-response evidence is capped at FIRM unless
-    a time-based differential or a correlated ``oob_hit`` proves the gadget ran.
-    An OOB token in the response body is reflection, not a received callback (I3).
+    a response or time-based differential, or a correlated ``oob_hit``, proves
+    the gadget ran. An OOB token in the response body is reflection, not a
+    received callback (I3).
 
     Args:
         output: Response body or error output
@@ -1911,6 +1914,7 @@ def validate_deserialization(
         baseline_time_ms: Baseline response time
         oob_hit: True iff an OOB interaction was received and correlated (P3).
         oob_evidence: Raw OOB interaction record proving the hit.
+        baseline_body: Control response body without the serialized payload.
     """
     chain = EvidenceChain()
     has_differential = False
@@ -1934,12 +1938,19 @@ def validate_deserialization(
 
     # Primary signal: expected command output (RCE confirmation)
     if expected_output and expected_output in output:
-        chain = chain.add(
-            signal=f"Expected command output found: {expected_output[:100]}",
-            source="deserialization_rce_confirm",
-            raw_data=output[:500],
-            weight=2.0,
-        )
+        if baseline_body and expected_output in baseline_body:
+            chain = chain.add_fp_check(
+                f"Expected output {expected_output[:100]!r} already present in baseline"
+                " — gadget causality not established"
+            )
+        else:
+            chain = chain.add(
+                signal=f"Expected command output found: {expected_output[:100]}",
+                source="deserialization_rce_confirm",
+                raw_data=output[:500],
+                weight=2.0,
+            )
+            has_differential = bool(baseline_body)
 
     # Check all confirmed signals
     for pattern, description, weight in _DESER_CONFIRMED_SIGNALS:

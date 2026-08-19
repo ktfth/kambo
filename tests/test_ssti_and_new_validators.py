@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import pytest
-
 from kambo.models import Confidence
 from kambo.validation import (
     validate_deserialization,
@@ -272,6 +270,28 @@ class TestValidateDeserialization:
         assert chain.total_weight >= 2.0
         assert chain.confidence == Confidence.FIRM
         assert any("I1" in g for g in chain.gates)
+
+    def test_expected_output_with_baseline_differential_confirms(self) -> None:
+        """A canary absent from the control response proves gadget causality."""
+        chain = validate_deserialization(
+            output="result: deser-kc9f2a",
+            expected_output="deser-kc9f2a",
+            baseline_body="result: not-run",
+        )
+
+        assert chain.confidence == Confidence.CONFIRMED
+        assert not chain.is_capped
+
+    def test_expected_output_already_in_baseline_is_not_evidence(self) -> None:
+        """A marker shared with the control cannot support gadget execution."""
+        chain = validate_deserialization(
+            output="status: deser-kc9f2a",
+            expected_output="deser-kc9f2a",
+            baseline_body="status: deser-kc9f2a",
+        )
+
+        assert chain.total_weight == 0
+        assert any("baseline" in check.lower() for check in chain.false_positive_checks)
 
     def test_oob_hit_confirms_deserialization(self) -> None:
         """A correlated OOB hit confirms blind deserialization (P3)."""
