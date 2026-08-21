@@ -51,6 +51,17 @@ When the user's request matches an available skill, invoke it via the Skill tool
 | Take a note, vector notes, what to work on next, blind spots, coverage, notes board, promote note | `/kambo-notes` |
 | Post social, publicar Threads, post do dia, divulgar kambo | `/kambo-social` |
 
+### Context feeding
+
+`hunt_context` is the single entry point for engagement state — call it instead of
+assembling `pipeline_status` + `note_query` + `report_metrics` + findings by hand.
+Every host it emits has passed the scope gate; what falls outside is dropped and
+counted in `out_of_scope_suppressed` without naming the target. A `degraded_*`
+status means the scope is unusable, not that recon came back empty.
+
+Modes: `brief` (state) | `resume` (where I stopped) | `scope` (the boundary) |
+`evidence` (what signal is missing). Budgets: `tight` | `normal` | `deep`.
+
 ## Self-Improvement Loop
 
 The system learns from every session:

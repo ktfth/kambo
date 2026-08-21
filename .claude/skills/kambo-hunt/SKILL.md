@@ -21,6 +21,31 @@ Before starting, verify:
 2. Program payouts are known (for pricing at the end)
 3. Timer is reset (`bounty_timer_reset`)
 
+Then load the engagement state with **one** call:
+
+```
+hunt_context(mode="brief")
+```
+
+Do not hand-assemble the briefing from `pipeline_status` + `note_query` +
+`report_metrics` + findings. `hunt_context` aggregates them, and — unlike a
+hand-rolled summary — every host it emits has passed the scope gate, so
+nothing out of scope enters your context in the first place. What it drops is
+counted in `out_of_scope_suppressed` without naming the target.
+
+Read the envelope before the sections:
+
+| Field | What it tells you |
+|---|---|
+| `status` | `ok`, or `degraded_no_scope` / `degraded_empty_scope` — a degraded status means **fix the scope**, not "recon found nothing" |
+| `out_of_scope_suppressed` | how much of the surface the scope is carving away; a high count against a small surface means the scope is narrower than the recon |
+| `estimated_tokens` | cost of this briefing (~900 for a full `brief`) |
+| `truncated` | what the budget omitted — raise `budget` to `deep` to see it |
+| `next_call_hint` | the tool to call next |
+
+Use `budget="tight"` when re-orienting mid-hunt and `deep` only when you
+genuinely need the long tail.
+
 ## Phase 1: Intelligence Gathering
 
 ```
@@ -34,7 +59,9 @@ Run in parallel where possible:
 4. `recon_waf` — detect defenses
 5. `recon_certs` — certificate transparency
 
-**CHECKPOINT**: After recon, run `report_metrics`.
+**CHECKPOINT**: After recon, run `hunt_context(mode="brief")` — it carries
+the metrics plus the scope-filtered surface, so it replaces the bare
+`report_metrics` call here.
 - If 0 subdomains found → pivot to direct scanning
 - If WAF detected → run `/kambo-waf-evade` to profile and bypass
 - If >100 subdomains → prioritize by wildcard detection
