@@ -30,7 +30,7 @@ from kambo.resources.findings_resource import get_findings_data
 from kambo.resources.scope_resource import get_scope_data
 from kambo.resources.session_resource import get_session_data
 from kambo.scope import get_scope_manager
-from kambo.tools import recon, scanning, vulns, exploit, post_exploit, reporting, api_security, cloud, containers, ad, bounty, platforms, notes
+from kambo.tools import recon, scanning, vulns, exploit, post_exploit, reporting, api_security, cloud, containers, ad, bounty, platforms, notes, context
 
 # Create the MCP server
 server = Server("kambo")
@@ -125,6 +125,24 @@ _TOOL_REGISTRY: dict[str, _ToolEntry] = {
         dispatch=lambda a: notes.note_promote(
             a["note_id"], a["severity"], a.get("title", ""), a.get("impact", ""),
             a.get("remediation", ""), a.get("cvss"), a.get("references"), a.get("allow_unconfirmed", False),
+        ),
+    ),
+    # ── context (single-call, scope-clean engagement briefing) ────────────
+    "hunt_context": _ToolEntry(
+        tool=Tool(name="hunt_context",
+                  description="Single-call, scope-clean, token-budgeted engagement briefing. Replaces chaining scope + pipeline_status + note_query(board/coverage) + report_metrics + findings. Every host/URL in the payload is validated against the active scope; out-of-scope items are omitted and only counted. Modes: brief (aggregate state) | resume (where I stopped / what next, ROI-ranked) | scope (the boundary: in/out, prohibitions, tiers) | evidence (per unconfirmed finding/note: which signal is missing to raise confidence).",
+                  inputSchema={
+                      "type": "object",
+                      "properties": {
+                          "mode": {"type": "string", "enum": ["brief", "resume", "scope", "evidence"], "description": "Briefing view (default brief)"},
+                          "budget": {"type": "string", "enum": ["tight", "normal", "deep"], "description": "Token budget — caps items per section (default normal)"},
+                          "target": {"type": "string", "description": "Optional substring filter scoping notes/surface to one asset"},
+                          "vector": {"type": "string", "description": "Optional attack-vector filter (evidence mode)"},
+                      },
+                  }),
+        dispatch=lambda a: context.hunt_context(
+            a.get("mode", "brief"), a.get("budget", "normal"),
+            a.get("target", ""), a.get("vector", ""),
         ),
     ),
     # ── vuln ──────────────────────────────────────────────────────────────
@@ -943,7 +961,15 @@ _PIPELINE_SKIP_TOOLS = frozenset({
     "pipeline_ingest", "pipeline_status", "pipeline_next", "pipeline_targets",
     "pipeline_reset", "set_scope", "container_status",
     "recon_snapshot", "recon_diff",
+    # Reads the pipeline to build a briefing — re-ingesting its own output would
+    # grow the surface on every read (self-feeding loop).
+    "hunt_context",
 })
+
+
+# Tools whose result must not be decorated with a historical FP warning — they
+# report on the session rather than scanning a target.
+_WARNING_SKIP_TOOLS = frozenset({"hunt_context"})
 
 
 @server.call_tool()
@@ -959,10 +985,12 @@ async def call_tool(name: str, arguments: dict) -> list[TextContent]:
             except Exception:
                 pass  # pipeline ingestion should never block tool execution
 
-        # Inject historical FP warning if available
+        # Inject historical FP warning if available. Meta tools are skipped: a
+        # false-positive rate is meaningless for them, and the string would be
+        # appended after the payload already declared its token estimate.
         from kambo.metrics import flush_metrics, get_metrics
         warning = get_metrics().get_fp_warning(name)
-        if warning and isinstance(result, dict):
+        if warning and isinstance(result, dict) and name not in _WARNING_SKIP_TOOLS:
             result["_historical_warning"] = warning
 
         # Persist metrics after each tool call

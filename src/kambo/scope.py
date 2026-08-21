@@ -133,8 +133,11 @@ class ScopeManager:
 
     def _matches(self, target: str, pattern: str) -> bool:
         """Check if target matches a scope pattern (domain, CIDR, wildcard)."""
-        # Extract domain from URL before any other checks
-        domain_match = re.search(r"https?://([^/:]+)", target)
+        # Extract the domain from a URL before any other check. The match is
+        # anchored: an unanchored search would pick an in-scope host out of a
+        # query string, so `attacker.test/redir?to=https://in.scope/` would
+        # validate as in-scope.
+        domain_match = re.match(r"https?://([^/:]+)", target)
         effective_target = domain_match.group(1) if domain_match else target
 
         # Wildcard domain: *.example.com
