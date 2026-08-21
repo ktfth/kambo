@@ -6,8 +6,10 @@ import json
 from datetime import datetime, timezone
 
 from kambo.database import get_database
+from kambo.hunt_context import filter_scope
 from kambo.metrics import get_metrics
 from kambo.models import Confidence, EvidenceChain, Finding, Phase, Severity
+from kambo.scope import active_engagement_key, get_scope_manager
 
 
 async def report_finding(
@@ -175,8 +177,26 @@ async def report_export(
         template: Report template — pentest, bug_bounty, api_assessment
         min_confidence: Minimum confidence to include — confirmed, firm, tentative
     """
+    # The findings store is one file shared by every engagement this machine has
+    # run, so an unfiltered export puts another customer's unfixed vulnerability
+    # — title, host, PoC, reproduction steps — inside the report written for the
+    # current program. Export is therefore scoped to the active engagement, and
+    # refuses outright when there is no engagement to scope it to.
+    scope = get_scope_manager().scope
+    if scope is None:
+        return {
+            "error": (
+                "No engagement scope configured. Exporting without a scope would mix "
+                "findings from every engagement in the store into one report. Call "
+                "set_scope first."
+            ),
+            "format": format,
+            "findings": [],
+            "total": 0,
+        }
+
     db = await get_database()
-    findings = await db.get_findings()
+    findings = await db.get_findings(engagement_key=active_engagement_key())
     metrics = get_metrics()
 
     # Filter by confidence
@@ -187,6 +207,17 @@ async def report_export(
         if confidence_order.get(f.get("confidence", "tentative"), 1) >= min_level
     ]
 
+    # Defence in depth: even inside the right engagement, a finding whose target
+    # is not in the authorised scope does not belong in this report.
+    off_scope = 0
+    in_scope_findings = []
+    for f in filtered:
+        if filter_scope([str(f.get("target", ""))]).kept:
+            in_scope_findings.append(f)
+        else:
+            off_scope += 1
+    filtered = in_scope_findings
+
     if format == "json":
         return {
             "format": "json",
@@ -194,6 +225,8 @@ async def report_export(
             "total": len(filtered),
             "filtered_from": len(findings),
             "min_confidence": min_confidence,
+            "engagement": scope.engagement_id or "(unnamed engagement)",
+            "withheld_out_of_scope": off_scope,
             "metrics": metrics.aggregate_summary(),
         }
 
@@ -284,6 +317,8 @@ async def report_export(
         "total_findings": len(filtered),
         "filtered_from": len(findings),
         "min_confidence": min_confidence,
+        "engagement": scope.engagement_id or "(unnamed engagement)",
+        "withheld_out_of_scope": off_scope,
     }
 
 

@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 from kambo.docker_runner import get_runner
+from kambo.host_parse import is_request_path
 from kambo.models import Phase
 from kambo.parsers import parse_ffuf, parse_nmap
 from kambo.parsers.generic_parser import parse_json_output
 from kambo.rate_limiter import get_rate_limiter
-from kambo.scope import validate_scope
+from kambo.scope import ScopeViolationError, validate_scope
 
 
 async def scan_ports_full(
@@ -218,8 +219,24 @@ async def scan_api_endpoints(
         "/swagger/v1/swagger.json", "/v1/swagger.json", "/v2/swagger.json",
     ]
 
-    # Check common spec paths
-    checks = " ".join(f'"{url}{p}"' for p in swagger_paths)
+    # Check common spec paths. Each path is caller-supplied and is concatenated
+    # onto the validated base URL, so a value starting with "@" would demote the
+    # validated host to URL userinfo and re-point the probe at another host —
+    # and the same string lands inside a shell command. Every path is required
+    # to be a plain request path and the assembled URL is re-validated.
+    spec_urls = []
+    for p in swagger_paths:
+        if not is_request_path(p):
+            raise ScopeViolationError(
+                p,
+                "swagger path must be a plain absolute request path — no scheme, "
+                "no '@', no shell metacharacters",
+            )
+        spec_url = f"{url}{p}"
+        validate_scope(spec_url)
+        spec_urls.append(spec_url)
+
+    checks = " ".join(f'"{u}"' for u in spec_urls)
     cmd = f"for u in {checks}; do code=$(curl -s -o /dev/null -w '%{{http_code}}' $u 2>/dev/null); echo \"$code $u\"; done"
     result = await runner.run(cmd, "scan_api_endpoints_spec", target, Phase.SCANNING, timeout=60)
 

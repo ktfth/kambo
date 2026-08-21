@@ -19,14 +19,18 @@ Two invariants drive every helper here:
 from __future__ import annotations
 
 import hashlib
-import ipaddress
 import json
-import re
 from typing import Any, Iterable
-from urllib.parse import urlsplit
 
 from pydantic import BaseModel, Field
 
+from kambo.host_parse import (
+    KIND_FREE,
+    KIND_HOST,
+    KIND_MALFORMED,
+    classify_value,
+    host_key,
+)
 from kambo.models import Confidence, Phase
 from kambo.scope import ScopeViolationError, get_scope_manager
 
@@ -59,18 +63,11 @@ REASON_EXCLUDED = "excluded"
 REASON_NOT_IN_SCOPE = "not_in_scope"
 REASON_MALFORMED = "malformed"
 
-# Value kinds returned by :func:`classify_value`.
-KIND_HOST = "host"          # locational — must be validated against the scope
-KIND_FREE = "free"          # not locational (bare port, request path) — passes free
-KIND_MALFORMED = "malformed"  # looks locational but no host can be extracted
-
-_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.\-]*://")
-_AUTHORITY_SPLIT = re.compile(r"[/?#]")
-_BRACKETED_V6 = re.compile(r"^\[(?P<v6>[0-9A-Fa-f:.]+)\](?::\d+)?$")
-_HOST_PORT = re.compile(r"^(?P<host>[^:]+):\d+$")
-_DIGITS = re.compile(r"^\d+$")
-# A hostname label set: letters, digits, dot, hyphen, underscore (``_dmarc``).
-_HOSTNAME = re.compile(r"^[A-Za-z0-9_](?:[A-Za-z0-9._\-]*[A-Za-z0-9_])?$")
+# Value kinds and the host parser live in :mod:`kambo.host_parse` — the single
+# implementation shared with :mod:`kambo.scope`, so the briefing and the
+# enforcement gate can never disagree about what the host of a value is.
+# Re-exported here for the existing callers of this module.
+_host_key = host_key
 
 
 def budget_limits(budget: str) -> dict[str, int]:
@@ -127,76 +124,6 @@ def suppression_mark(reason: str, identity: str) -> str:
 def _dedupe(marks: Iterable[str]) -> tuple[str, ...]:
     """Distinct marks in a stable order."""
     return tuple(sorted(set(marks)))
-
-
-def _host_key(host: str) -> str:
-    """The validated, normalised host of ``host``, or ``""`` when it is not a
-    well-formed host.
-
-    Accepts IPv4/IPv6 literals (via :mod:`ipaddress`) and hostnames restricted
-    to the DNS charset. A leading ``*.`` wildcard label is dropped so a wildcard
-    SAN is checked against its base domain. Anything else — a blob with spaces,
-    an embedded URL, a stray delimiter — is rejected rather than forwarded to
-    ``ScopeManager.validate``, whose matcher would happily find an in-scope host
-    *inside* it.
-    """
-    candidate = host.strip().rstrip(".").lower()
-    if candidate.startswith("*."):
-        candidate = candidate[2:]
-    if not candidate:
-        return ""
-    try:
-        return str(ipaddress.ip_address(candidate))
-    except ValueError:
-        pass
-    return candidate if _HOSTNAME.match(candidate) else ""
-
-
-def classify_value(value: str) -> tuple[str, str]:
-    """Classify a surface value as ``(kind, key)``.
-
-    * ``KIND_HOST`` — locational; ``key`` is the bare host to validate.
-    * ``KIND_FREE`` — not locational (a bare port, a request path); it passes
-      free and is never counted, because validating ``443`` would suppress it as
-      out-of-scope and corrupt the counter.
-    * ``KIND_MALFORMED`` — it occupies a locational field but no host can be
-      extracted from it. It is suppressed, never emitted: failing closed is the
-      only safe answer for a value whose locality cannot be established.
-
-    Locality is derived by parsing, not by string shape: a protocol-relative
-    ``//host/path`` is a URL (not a path), an IPv6 literal is a host (not an
-    opaque token), and ``attacker.test/redir?to=https://in.scope/`` yields
-    ``attacker.test`` (not the host embedded in its query string).
-    """
-    raw = value.strip()
-    if not raw:
-        return KIND_MALFORMED, raw
-    if raw.startswith("//"):
-        raw = "https:" + raw  # protocol-relative URL — locational, not a path
-    elif raw.startswith("/"):
-        return KIND_FREE, ""  # request path, not a host
-
-    if _SCHEME.match(raw):
-        key = _host_key(urlsplit(raw).hostname or "")
-        return (KIND_HOST, key) if key else (KIND_MALFORMED, value.strip())
-
-    authority = _AUTHORITY_SPLIT.split(raw, maxsplit=1)[0]
-    if not authority:
-        return KIND_MALFORMED, value.strip()
-
-    bracketed = _BRACKETED_V6.match(authority)
-    if bracketed:
-        key = _host_key(bracketed.group("v6"))
-        return (KIND_HOST, key) if key else (KIND_MALFORMED, value.strip())
-
-    with_port = _HOST_PORT.match(authority)
-    if with_port:
-        authority = with_port.group("host")
-    if _DIGITS.match(authority):
-        return KIND_FREE, ""  # bare port number
-
-    key = _host_key(authority)
-    return (KIND_HOST, key) if key else (KIND_MALFORMED, value.strip())
 
 
 def scope_key(value: str) -> str | None:

@@ -19,6 +19,14 @@ from urllib.parse import quote
 
 import requests
 
+from kambo.host_parse import extract_host
+from kambo.scope import (
+    ScopeViolationError,
+    active_engagement_key,
+    get_scope_manager,
+    validate_scope,
+)
+
 
 # ---------------------------------------------------------------------------
 # HackerOne API
@@ -436,8 +444,89 @@ async def platform_check_duplicate(
     return {"error": f"Duplicate check not available for: {platform}", "platform": platform}
 
 
+def _submission_refusal(platform: str, handle: str, report: dict[str, Any]) -> str:
+    """Reason to refuse this submission, or ``""`` when it may proceed.
+
+    Submitting is the only irreversible action in the server: it publishes a
+    working exploit for someone else's asset, and it cannot be recalled. So it
+    is gated like a network touch, not like a read. Every check below compares
+    the submission against the *active engagement*, because the failure mode
+    that matters is submitting program A's finding to program B — disclosing an
+    unfixed vulnerability of one customer to another.
+    """
+    scope = get_scope_manager().scope
+    if scope is None:
+        return (
+            "No engagement scope configured. Submitting a report without an active "
+            "scope cannot be checked against the program it belongs to — refusing."
+        )
+
+    if scope.platform and scope.platform.strip().lower() != platform.strip().lower():
+        return (
+            f"Platform mismatch: the active engagement is on '{scope.platform}' but "
+            f"this report is being submitted to '{platform}'. Refusing — set the "
+            "scope for the program you are actually reporting to."
+        )
+
+    asset = str(report.get("asset", "")).strip()
+    if asset:
+        try:
+            validate_scope(asset)
+        except ScopeViolationError as exc:
+            return (
+                f"Asset '{asset}' is not part of the active engagement ({exc.reason}). "
+                "Refusing — this is how one program's finding ends up filed against "
+                "another."
+            )
+
+    return ""
+
+
+async def _load_other_engagement_targets() -> set[str]:
+    """Read the findings store and collect targets from other engagements."""
+    try:
+        from kambo.database import get_database
+
+        db = await get_database()
+        # Bounded: an unreachable or locked store must not stall a submission
+        # indefinitely — the scope, platform and asset gates still apply.
+        rows = await asyncio.wait_for(db.get_findings(), timeout=10)
+    except Exception:  # pragma: no cover - store unavailable, other gates stand
+        return set()
+
+    active = active_engagement_key()
+    hosts: set[str] = set()
+    for row in rows:
+        if str(row.get("engagement_key", "")) == active:
+            continue
+        host = extract_host(str(row.get("target", "")))
+        if host:
+            hosts.add(host)
+    return hosts
+
+
 async def platform_submit_report(platform: str, handle: str, report: dict[str, Any]) -> dict[str, Any]:
-    """Submit a report to any platform."""
+    """Submit a report to any platform.
+
+    Gated: see :func:`_submission_refusal`. A refusal returns an error instead of
+    submitting — there is no override flag, because the whole point is that the
+    caller who wants to submit is the one who may be mistaken about which
+    program this finding belongs to.
+    """
+    refusal = _submission_refusal(platform, handle, report)
+    if not refusal:
+        foreign = await _load_other_engagement_targets()
+        text = f"{report.get('title', '')}\n{report.get('body', '')}\n{report.get('asset', '')}".lower()
+        cited = {host for host in foreign if host in text}
+        if cited:
+            refusal = (
+                "Report text references host(s) recorded under a different engagement: "
+                f"{', '.join(sorted(cited))}. Refusing — submitting one program's "
+                "finding to another discloses an unfixed vulnerability to a third party."
+            )
+    if refusal:
+        return {"error": refusal, "status": "refused", "platform": platform, "handle": handle}
+
     if platform == "hackerone":
         return await asyncio.to_thread(
             h1_submit_report,

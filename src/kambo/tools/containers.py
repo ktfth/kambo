@@ -2,9 +2,34 @@
 
 from __future__ import annotations
 
+import shlex
+
 from kambo.docker_runner import get_runner
+from kambo.host_parse import extract_host, is_shell_safe
 from kambo.models import Phase
-from kambo.scope import validate_scope
+from kambo.scope import ScopeViolationError, validate_scope
+
+
+def _validated_api_server(api_server: str, target: str) -> tuple[str, str]:
+    """Resolve the K8s API server URL and validate the host it really points at.
+
+    ``api_server`` overrides ``target`` as the request destination, so
+    validating only ``target`` would make the scope gate decorative: the
+    approved name would be nothing but a passphrase unlocking a request (and a
+    bearer token) aimed anywhere. Returns ``(url, host)`` — the host is also
+    what gets recorded as the run's target, so the session log names the machine
+    actually contacted.
+    """
+    if not api_server:
+        validate_scope(target)
+        return f"https://{target}:6443", extract_host(target) or target
+    if not is_shell_safe(api_server):
+        raise ScopeViolationError(api_server, "api_server contains shell metacharacters")
+    host = extract_host(api_server)
+    if not host:
+        raise ScopeViolationError(api_server, "api_server has no well-formed host")
+    validate_scope(host)
+    return api_server, host
 
 
 async def container_escape_detect(target: str) -> dict:
@@ -86,18 +111,18 @@ async def k8s_rbac_enum(
         token: Service account token
         api_server: K8s API server URL
     """
-    validate_scope(target)
+    server, server_host = _validated_api_server(api_server, target)
     runner = get_runner()
 
     auth_header = f'-H "Authorization: Bearer {token}"' if token else ""
-    server = api_server or f"https://{target}:6443"
+    server = shlex.quote(server)
 
     cmd = f'curl -sk {auth_header} {server}/api/v1/namespaces 2>/dev/null | jq ".items[].metadata.name" 2>/dev/null'
-    result = await runner.run(cmd, "k8s_rbac_enum", target, Phase.POST_EXPLOITATION, timeout=30)
+    result = await runner.run(cmd, "k8s_rbac_enum", server_host, Phase.POST_EXPLOITATION, timeout=30)
 
     # Check what we can do
     cmd2 = f'curl -sk {auth_header} {server}/apis/authorization.k8s.io/v1/selfsubjectaccessreviews -X POST -H "Content-Type: application/json" -d \'{{"apiVersion":"authorization.k8s.io/v1","kind":"SelfSubjectAccessReview","spec":{{"resourceAttributes":{{"verb":"create","resource":"pods"}}}}}}\' 2>/dev/null'
-    result2 = await runner.run(cmd2, "k8s_rbac_check", target, Phase.POST_EXPLOITATION, timeout=15)
+    result2 = await runner.run(cmd2, "k8s_rbac_check", server_host, Phase.POST_EXPLOITATION, timeout=15)
 
     return {
         "target": target,

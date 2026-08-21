@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import json
+import os
 import re
+import shlex
 
 from kambo.docker_runner import get_runner
+from kambo.host_parse import extract_host, is_shell_safe
 from kambo.metrics import get_metrics
 from kambo.models import (
     Confidence,
@@ -14,8 +17,42 @@ from kambo.models import (
     chain_rank,
     confidence_meets,
 )
-from kambo.scope import validate_scope
+from kambo.scope import ScopeViolationError, validate_scope
 from kambo.validation import validate_ssrf
+
+# Public code-hosting services. A bug bounty scope almost never lists them, yet
+# scanning a target's public repository is the legitimate use of this tool — so
+# they are allowed explicitly instead of being reachable by accident. Anything
+# else must be inside the engagement scope. Override with a comma-separated
+# KAMBO_CODE_HOSTS if a program hosts its code elsewhere.
+_DEFAULT_CODE_HOSTS = ("github.com", "gitlab.com", "bitbucket.org", "codeberg.org", "sr.ht")
+
+
+def _code_hosts() -> tuple[str, ...]:
+    configured = os.environ.get("KAMBO_CODE_HOSTS", "")
+    if not configured.strip():
+        return _DEFAULT_CODE_HOSTS
+    return tuple(h.strip().lower() for h in configured.split(",") if h.strip())
+
+
+def _validated_repo_url(repo_url: str) -> str:
+    """Return ``repo_url`` if Kambo may clone it, else refuse.
+
+    ``validate_scope(target)`` guards the *target*, but the clone goes to
+    ``repo_url`` — an unvalidated second destination. The value is also
+    interpolated into a shell command, so it must additionally be free of
+    metacharacters.
+    """
+    if not is_shell_safe(repo_url):
+        raise ScopeViolationError(repo_url, "repo_url contains shell metacharacters")
+    host = extract_host(repo_url)
+    if not host:
+        raise ScopeViolationError(repo_url, "repo_url has no well-formed host")
+    allowed = _code_hosts()
+    if host in allowed or any(host.endswith(f".{h}") for h in allowed):
+        return repo_url
+    validate_scope(host)
+    return repo_url
 
 
 async def cloud_imds_test(
@@ -221,7 +258,7 @@ async def cloud_secret_scan(
     metrics = get_metrics()
 
     if repo_url:
-        cmd = f"trufflehog git {repo_url} --json 2>/dev/null | head -100"
+        cmd = f"trufflehog git {shlex.quote(_validated_repo_url(repo_url))} --json 2>/dev/null | head -100"
     else:
         cmd = f"trufflehog filesystem /output --json 2>/dev/null | head -100"
 

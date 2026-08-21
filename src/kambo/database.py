@@ -10,6 +10,7 @@ import aiosqlite
 
 from kambo.config import get_config
 from kambo.models import Finding, Phase, ToolResult
+from kambo.scope import active_engagement_key
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS findings (
@@ -29,6 +30,7 @@ CREATE TABLE IF NOT EXISTS findings (
     remediation TEXT DEFAULT '',
     references_json TEXT DEFAULT '[]',
     tools_used TEXT DEFAULT '[]',
+    engagement_key TEXT NOT NULL DEFAULT '',
     timestamp TEXT NOT NULL
 );
 
@@ -103,6 +105,14 @@ class Database:
             migrations.append(
                 "ALTER TABLE findings ADD COLUMN evidence_chain TEXT DEFAULT '{}'"
             )
+        if "engagement_key" not in existing:
+            # Findings predating this column carry no engagement identity. They
+            # stay empty on purpose: an empty key matches no active engagement,
+            # so old rows are withheld from exports rather than attributed to
+            # whichever program happens to be loaded now.
+            migrations.append(
+                "ALTER TABLE findings ADD COLUMN engagement_key TEXT NOT NULL DEFAULT ''"
+            )
 
         for sql in migrations:
             await self._db.execute(sql)
@@ -147,8 +157,9 @@ class Database:
         await self._db.execute(
             """INSERT OR REPLACE INTO findings
                (id, title, severity, confidence, cvss, cvss_vector, phase, target, description,
-                reproduction_steps, evidence, evidence_chain, impact, remediation, references_json, tools_used, timestamp)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                reproduction_steps, evidence, evidence_chain, impact, remediation, references_json, tools_used,
+                engagement_key, timestamp)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 finding.id,
                 finding.title,
@@ -166,19 +177,34 @@ class Database:
                 finding.remediation,
                 json.dumps(finding.references),
                 json.dumps(finding.tools_used),
+                active_engagement_key(),
                 finding.timestamp.isoformat(),
             ),
         )
         await self._db.commit()
 
-    async def get_findings(self, severity: str | None = None) -> list[dict]:
-        """Retrieve all findings, optionally filtered by severity."""
+    async def get_findings(
+        self, severity: str | None = None, engagement_key: str | None = None
+    ) -> list[dict]:
+        """Retrieve findings, optionally filtered by severity and engagement.
+
+        ``engagement_key`` restricts the result to one engagement. It is how a
+        report for program B is kept from carrying program A's findings — the
+        store is a single file shared by every engagement this machine has ever
+        run.
+        """
         assert self._db is not None
         query = "SELECT * FROM findings"
+        clauses: list[str] = []
         params: list = []
         if severity:
-            query += " WHERE severity = ?"
+            clauses.append("severity = ?")
             params.append(severity)
+        if engagement_key is not None:
+            clauses.append("engagement_key = ?")
+            params.append(engagement_key)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         query += " ORDER BY timestamp DESC"
 
         async with self._db.execute(query, params) as cursor:

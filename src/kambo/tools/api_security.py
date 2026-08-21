@@ -11,10 +11,42 @@ import hashlib
 import re
 
 from kambo.docker_runner import get_runner
+from kambo.host_parse import is_request_path
 from kambo.metrics import get_metrics
 from kambo.models import EvidenceChain, Phase
-from kambo.scope import validate_scope
+from kambo.scope import ScopeViolationError, validate_scope
 from kambo.validation import HttpResponse, validate_bfla
+
+
+def _safe_endpoint(endpoint: str) -> str:
+    """Return ``endpoint`` if it is a plain request path, else refuse.
+
+    ``validate_scope(target)`` only guards the *target*; the endpoint is
+    concatenated onto the validated base URL afterwards. A value beginning with
+    ``@`` demotes the validated host to URL userinfo and re-points the request
+    (with its Authorization header) at a host of the endpoint's choosing, and
+    the same string is interpolated into a shell command. So the endpoint must
+    look like a path and nothing else — anything ambiguous is refused rather
+    than sanitised.
+    """
+    if not is_request_path(endpoint):
+        raise ScopeViolationError(
+            endpoint,
+            "endpoint must be a plain absolute request path — no scheme, no '@' "
+            "(URL userinfo re-points the request), no shell metacharacters",
+        )
+    return endpoint
+
+
+def _endpoint_url(base_url: str, endpoint: str) -> str:
+    """Assemble ``base_url`` + ``endpoint`` and re-validate the effective host.
+
+    The scope gate is applied to the URL that will actually be requested, not to
+    the label the caller passed as ``target``.
+    """
+    assembled = f"{base_url}{_safe_endpoint(endpoint)}"
+    validate_scope(assembled)
+    return assembled
 
 
 async def _curl_full(runner, url: str, token: str, tool_name: str, target: str) -> tuple[str, str, str]:
@@ -65,10 +97,10 @@ async def api_test_bola(
 
     for endpoint in endpoints:
         # Step 1: Access with legitimate user (user B) for baseline
-        status_b, body_b, _ = await _curl_full(runner, f"{url}{endpoint}", user_b_token, "api_test_bola_baseline", target)
+        status_b, body_b, _ = await _curl_full(runner, _endpoint_url(url, endpoint), user_b_token, "api_test_bola_baseline", target)
 
         # Step 2: Access with user A (should be denied)
-        status_a, body_a, _ = await _curl_full(runner, f"{url}{endpoint}", user_a_token, "api_test_bola", target)
+        status_a, body_a, _ = await _curl_full(runner, _endpoint_url(url, endpoint), user_a_token, "api_test_bola", target)
 
         # Step 3: Validate — not just status code
         is_vulnerable = False
@@ -162,7 +194,7 @@ async def api_test_auth(
         # Test multiple endpoints without auth
         test_paths = ["/api/users", "/api/profile", "/api/me", "/api/account"]
         for path in test_paths:
-            status, body, _ = await _curl_full(runner, f"{url}{path}", "", "api_test_auth_noauth", target)
+            status, body, _ = await _curl_full(runner, _endpoint_url(url, path), "", "api_test_auth_noauth", target)
             if status in ("200", "201") and len(body.strip()) > 20:
                 # Check if response contains actual data vs. generic message
                 error_words = ["unauthorized", "login", "authenticate", "forbidden"]
@@ -243,11 +275,11 @@ async def api_test_bfla(
 
     for endpoint in admin_endpoints:
         # Step 1: Baseline — unauthenticated request
-        unauth_status, unauth_body, _ = await _curl_full(runner, f"{url}{endpoint}", "", "api_test_bfla_baseline", target)
+        unauth_status, unauth_body, _ = await _curl_full(runner, _endpoint_url(url, endpoint), "", "api_test_bfla_baseline", target)
         baseline_unauth = HttpResponse(status=int(unauth_status) if unauth_status.isdigit() else 0, body=unauth_body)
 
         # Step 2: Test with regular user token
-        status, body, _ = await _curl_full(runner, f"{url}{endpoint}", regular_token, "api_test_bfla", target)
+        status, body, _ = await _curl_full(runner, _endpoint_url(url, endpoint), regular_token, "api_test_bfla", target)
 
         # Step 3: Validate with proper body analysis
         endpoint_chain = validate_bfla(endpoint, status, body, baseline_unauth)
@@ -302,6 +334,7 @@ async def api_test_bopla(
     metrics = get_metrics()
 
     url = target if target.startswith("http") else f"https://{target}"
+    endpoint_url = _endpoint_url(url, endpoint)
     fields = mass_assignment_fields or ["role", "is_admin", "balance", "verified", "permissions"]
 
     chain = EvidenceChain()
@@ -310,7 +343,7 @@ async def api_test_bopla(
     baseline_cmd = (
         f'curl -s -D - -X PUT -H "Authorization: Bearer {token}" '
         f'-H "Content-Type: application/json" '
-        f'-d \'{{"name": "test"}}\' "{url}{endpoint}" 2>/dev/null'
+        f'-d \'{{"name": "test"}}\' "{endpoint_url}" 2>/dev/null'
     )
     baseline_result = await runner.run(baseline_cmd, "api_test_bopla_baseline", target, Phase.VULN_ANALYSIS, timeout=15)
     baseline_parts = baseline_result.raw_output.split("\r\n\r\n", 1)
@@ -322,7 +355,7 @@ async def api_test_bopla(
         cmd = (
             f'curl -s -D - -X PUT -H "Authorization: Bearer {token}" '
             f'-H "Content-Type: application/json" '
-            f"-d '{payload}' \"{url}{endpoint}\" 2>/dev/null"
+            f"-d '{payload}' \"{endpoint_url}\" 2>/dev/null"
         )
         result = await runner.run(cmd, "api_test_bopla", target, Phase.VULN_ANALYSIS, timeout=15)
 
@@ -392,6 +425,7 @@ async def api_test_resource(
     metrics = get_metrics()
 
     url = target if target.startswith("http") else f"https://{target}"
+    endpoint_url = _endpoint_url(url, endpoint)
     bypass_headers = bypass_headers or [
         "X-Forwarded-For: 127.0.0.{i}",
         "X-Real-IP: 10.0.0.{i}",
@@ -401,7 +435,7 @@ async def api_test_resource(
     chain = EvidenceChain()
 
     # Test baseline rate limit
-    cmd = f'for i in $(seq 1 20); do curl -s -o /dev/null -w "%{{http_code}} " "{url}{endpoint}" 2>/dev/null; done'
+    cmd = f'for i in $(seq 1 20); do curl -s -o /dev/null -w "%{{http_code}} " "{endpoint_url}" 2>/dev/null; done'
     result = await runner.run(cmd, "api_test_resource_baseline", target, Phase.VULN_ANALYSIS, timeout=30)
     baseline_codes = result.raw_output.strip().split()
 
@@ -420,7 +454,7 @@ async def api_test_resource(
         chain = chain.add_fp_check("Rate limiting is in place (429 returned)")
         for header_template in bypass_headers:
             header = header_template.format(i=1)
-            cmd = f'curl -s -o /dev/null -w "%{{http_code}}" -H "{header}" "{url}{endpoint}" 2>/dev/null'
+            cmd = f'curl -s -o /dev/null -w "%{{http_code}}" -H "{header}" "{endpoint_url}" 2>/dev/null'
             result = await runner.run(cmd, "api_test_resource_bypass", target, Phase.VULN_ANALYSIS, timeout=10)
             status = result.raw_output.strip()
             bypassed = status not in ("429", "000")

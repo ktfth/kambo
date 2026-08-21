@@ -2,12 +2,59 @@
 
 from __future__ import annotations
 
+import hashlib
 import ipaddress
-import re
 from functools import wraps
 from typing import Any, Callable
 
+from kambo.host_parse import extract_host, has_path_component, host_key
 from kambo.models import Context, EngagementScope
+
+
+def _as_network(value: str) -> ipaddress.IPv4Network | ipaddress.IPv6Network | None:
+    """``value`` as an IP network, or ``None`` when it is not one.
+
+    Only a value :mod:`ipaddress` actually parses counts as CIDR — a mere ``/``
+    in the string does not, so ``example.com/wp-admin`` is treated as a host
+    pattern with a path rather than silently falling through a failed CIDR
+    branch.
+    """
+    if "/" not in value:
+        return None
+    try:
+        return ipaddress.ip_network(value, strict=False)
+    except ValueError:
+        return None
+
+
+def _as_address(value: str) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """``value`` as an IP address, or ``None`` when it is not one."""
+    try:
+        return ipaddress.ip_address(value.strip())
+    except ValueError:
+        return None
+
+
+def engagement_key(scope: EngagementScope | None) -> str:
+    """A stable identity for the engagement a piece of data belongs to.
+
+    ``engagement_id`` is optional and frequently left blank, so a blank id must
+    not make two different programs look like the same engagement. When it is
+    absent the key falls back to a digest of the platform plus the authorised
+    target list, which differs between programs by construction.
+    """
+    if scope is None:
+        return ""
+    if scope.engagement_id.strip():
+        return f"id:{scope.engagement_id.strip().lower()}"
+    basis = "|".join(sorted(t.target.strip().lower() for t in scope.targets))
+    digest = hashlib.sha256(f"{scope.platform.strip().lower()}::{basis}".encode()).hexdigest()
+    return f"fp:{digest[:16]}"
+
+
+def active_engagement_key() -> str:
+    """The engagement key of the currently configured scope (``""`` if none)."""
+    return engagement_key(_scope_manager.scope)
 
 
 class ScopeViolationError(Exception):
@@ -111,17 +158,27 @@ class ScopeManager:
         if self._scope is None:
             raise ScopeViolationError(target, "No scope configured. Set scope first.")
 
+        # A target from which no well-formed host can be derived is refused
+        # before any pattern is consulted. There is no "compare the raw string
+        # instead" fallback: every scope bypass found in this matcher came from
+        # comparing a pattern against a blob that merely *contained* a host.
+        host = extract_host(target)
+        if not host:
+            raise ScopeViolationError(
+                target, "No well-formed host could be extracted — refusing (fail closed)."
+            )
+
         # Check global exclusions
         for exclusion in self._scope.exclusions:
-            if self._matches(target, exclusion):
+            if self._matches(target, exclusion, allow=False):
                 raise ScopeViolationError(target, f"Matches global exclusion: {exclusion}")
 
         # Check if target matches any scope target
         for scope_target in self._scope.targets:
-            if self._matches(target, scope_target.target):
+            if self._matches(target, scope_target.target, allow=True):
                 # Check per-target exclusions
                 for exclusion in scope_target.exclusions:
-                    if self._matches(target, exclusion):
+                    if self._matches(target, exclusion, allow=False):
                         raise ScopeViolationError(
                             target, f"Matches exclusion for {scope_target.target}: {exclusion}"
                         )
@@ -131,31 +188,66 @@ class ScopeManager:
             target, f"Not in scope. Authorized targets: {[t.target for t in self._scope.targets]}"
         )
 
-    def _matches(self, target: str, pattern: str) -> bool:
-        """Check if target matches a scope pattern (domain, CIDR, wildcard)."""
-        # Extract the domain from a URL before any other check. The match is
-        # anchored: an unanchored search would pick an in-scope host out of a
-        # query string, so `attacker.test/redir?to=https://in.scope/` would
-        # validate as in-scope.
-        domain_match = re.match(r"https?://([^/:]+)", target)
-        effective_target = domain_match.group(1) if domain_match else target
+    def _matches(self, target: str, pattern: str, *, allow: bool = True) -> bool:
+        """Check if ``target`` matches a scope pattern (domain, CIDR, wildcard).
+
+        Both sides are reduced to a normalised host first (see
+        :mod:`kambo.host_parse`) so that DNS case-insensitivity, trailing root
+        dots, ports, URL userinfo, query strings and fragments cannot change the
+        answer. Everything that is not a host — a query string carrying an
+        in-scope name, a userinfo label, an embedded redirect URL — is discarded
+        by the parser instead of being suffix-matched.
+
+        ``allow`` distinguishes the two roles a pattern can play, because the
+        safe failure direction is opposite for each:
+
+        * an *allow* pattern that names a location inside a host
+          (``https://app.example.com/api``) must never be widened to the whole
+          host — widening authorises traffic the program did not;
+        * an *exclusion* pattern in the same shape is reduced to its host and
+          blocks it entirely — over-blocking costs a finding, under-blocking
+          costs the program.
+        """
+        host = extract_host(target)
+        if not host:
+            # Nothing locational to compare. Allow: no match (fail closed).
+            # Exclude: also no match — validate() has already refused the
+            # target outright, so this can never open a hole.
+            return False
+
+        pat = pattern.strip()
+        if not pat:
+            return False
 
         # Wildcard domain: *.example.com
-        if pattern.startswith("*."):
-            base = pattern[2:]
-            return effective_target == base or effective_target.endswith(f".{base}")
+        if pat.startswith("*."):
+            base = host_key(pat[2:])
+            if not base:
+                return False
+            return host == base or host.endswith(f".{base}")
 
         # CIDR notation
-        if "/" in pattern:
-            try:
-                network = ipaddress.ip_network(pattern, strict=False)
-                ip = ipaddress.ip_address(effective_target)
-                return ip in network
-            except ValueError:
-                pass
+        network = _as_network(pat)
+        if network is not None:
+            ip = _as_address(host)
+            if ip is None or ip.version != network.version:
+                return False
+            return ip in network
 
-        # Exact match
-        return effective_target == pattern or target == pattern
+        # Bare IP literal — compared as an address, so every textual spelling of
+        # the same IPv6 address (compressed, expanded, upper-cased) matches.
+        addr = _as_address(pat)
+        if addr is not None:
+            ip = _as_address(host)
+            return ip is not None and ip == addr
+
+        # Host pattern. A URL-form pattern (``https://admin.example.com``) is
+        # reduced to its host so a scope list pasted from a platform — where a
+        # URL asset is literally ``https://host/path`` — actually enforces.
+        if allow and has_path_component(pat):
+            return False
+        pat_host = extract_host(pat)
+        return bool(pat_host) and host == pat_host
 
 
 # Global scope manager instance
