@@ -18,7 +18,7 @@ jobs:
   quick:
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -52,7 +52,7 @@ jobs:
   matrix:
     if: github.event_name != 'pull_request'
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 30
+    timeout-minutes: 10
     strategy:
       fail-fast: false
       matrix:
@@ -90,6 +90,80 @@ jobs:
             .reports/report.json
             coverage.xml
           retention-days: 30
+
+  # A red cron has no audience. That is how a broken nightly sat unnoticed from
+  # late May to the end of August: the matrix failed every night and the only
+  # record was a red dot nobody opens. File it where the agents already look.
+  # `cancelled` counts as failing — a job killed by its own timeout is how a
+  # hang reports itself, and that is exactly the case worth waking someone for.
+  report-nightly-failure:
+    if: >-
+      always() && github.event_name == 'schedule' &&
+      (needs.matrix.result == 'failure' || needs.matrix.result == 'cancelled')
+    needs: matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Open or update the nightly-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          MATRIX_RESULT: ${{ needs.matrix.result }}
+        run: |
+          set -euo pipefail
+
+          gh label create ci-nightly --color d73a4a \
+            --description "Scheduled test matrix is failing on main" || true
+
+          body=$(printf '%s\n' \
+            "The scheduled test matrix finished as \`$MATRIX_RESULT\` on \`main\`." \
+            "" \
+            "- Run: $RUN_URL" \
+            "- Commit: \`$GITHUB_SHA\`" \
+            "" \
+            "A \`cancelled\` result usually means a job hit its timeout. Check" \
+            "whether the tests actually passed and the process then failed to" \
+            "exit, rather than assuming a test failure.")
+
+          existing=$(gh issue list --state open --label ci-nightly \
+                       --json number --jq '.[0].number // empty')
+
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$body"
+            echo "::notice::Nightly still red — commented on issue #$existing"
+          else
+            url=$(gh issue create --title "Nightly test matrix is red on main" \
+                    --label ci-nightly --label bug --body "$body")
+            echo "::notice::Opened nightly-failure issue: $url"
+          fi
+
+  # Close the alarm when the nightly goes green again, so an open ci-nightly
+  # issue always means the matrix is red right now.
+  resolve-nightly-failure:
+    if: github.event_name == 'schedule' && needs.matrix.result == 'success'
+    needs: matrix
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Close any open nightly-failure issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          set -euo pipefail
+          for number in $(gh issue list --state open --label ci-nightly \
+                            --json number --jq '.[].number'); do
+            gh issue close "$number" --comment "Nightly matrix is green again: $RUN_URL"
+            echo "::notice::Closed nightly-failure issue #$number"
+          done
 
   # On pushes to main, promote the report so PRs have a baseline to compare against.
   promote-baseline:
