@@ -485,6 +485,25 @@ class TestCallToolEnvelope:
         assert json.loads(contents[0].text)["error"] == "'target'"
 
 
+@pytest.fixture
+def stub_database():
+    """Serve the database-backed resources from an in-memory double.
+
+    aiosqlite runs every connection on a non-daemon thread, so reaching the
+    real singleton here would keep the process alive long after pytest
+    reports its results — a CI timeout half an hour later rather than a
+    failed test. See the session finalizer in conftest.py.
+    """
+    db = MagicMock()
+    db.get_findings = AsyncMock(return_value=[])
+    db.get_session_log = AsyncMock(return_value=[])
+
+    with patch("kambo.resources.findings_resource.get_database",
+               new_callable=AsyncMock, return_value=db),          patch("kambo.resources.session_resource.get_database",
+               new_callable=AsyncMock, return_value=db):
+        yield db
+
+
 class TestResources:
     """The three MCP resources and their unknown-URI fallback."""
 
@@ -494,7 +513,7 @@ class TestResources:
         assert uris == {"scope://targets", "findings://current", "session://log"}
 
     @pytest.mark.asyncio
-    async def test_every_advertised_resource_is_readable(self) -> None:
+    async def test_every_advertised_resource_is_readable(self, stub_database) -> None:
         for resource in await server.list_resources():
             payload = json.loads(await server.read_resource(str(resource.uri)))
             assert "error" not in payload, f"{resource.uri} is advertised but unreadable"
@@ -505,12 +524,12 @@ class TestResources:
         assert payload["engagement_id"] == "TEST-001"
 
     @pytest.mark.asyncio
-    async def test_findings_resource_is_json(self) -> None:
+    async def test_findings_resource_is_json(self, stub_database) -> None:
         payload = json.loads(await server.read_resource("findings://current"))
         assert isinstance(payload, dict)
 
     @pytest.mark.asyncio
-    async def test_session_resource_is_json(self) -> None:
+    async def test_session_resource_is_json(self, stub_database) -> None:
         payload = json.loads(await server.read_resource("session://log"))
         assert isinstance(payload, dict)
 

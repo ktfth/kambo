@@ -125,6 +125,31 @@ def patch_runner(responses: dict[str, str | ToolResult]):
 
 
 # ---------------------------------------------------------------------------
+# Database singleton guard — keeps the runner from hanging after the last test
+# ---------------------------------------------------------------------------
+
+@pytest.fixture(scope="session", autouse=True)
+def _close_database_singleton():
+    """Close the shared database connection once the session ends.
+
+    aiosqlite drives each connection from a non-daemon thread, so any test that
+    reaches the real `get_database()` singleton and leaves it open keeps the
+    interpreter alive after pytest has already printed its results. On CI that
+    reads as a job timeout half an hour later with every test green — not as a
+    failure anyone can trace back. Closing it here makes that impossible.
+    """
+    yield
+
+    import asyncio
+
+    import kambo.database as database
+
+    if database._db is not None:
+        asyncio.run(database._db.close())
+        database._db = None
+
+
+# ---------------------------------------------------------------------------
 # Database fixture — in-memory SQLite for testing
 # ---------------------------------------------------------------------------
 
