@@ -1163,10 +1163,8 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
             "total_assets": len(pipeline.assets),
         }
     if name == "pipeline_status":
-        from kambo.pipeline import get_pipeline
         return get_pipeline().summary()
     if name == "pipeline_next":
-        from kambo.pipeline import get_pipeline
         pipeline = get_pipeline()
         phase = Phase(args["phase"])
         steps = pipeline.suggest_next_steps(phase, args.get("max_steps", 5))
@@ -1178,10 +1176,8 @@ async def _dispatch_tool(name: str, args: dict) -> dict:
             ],
         }
     if name == "pipeline_targets":
-        from kambo.pipeline import get_pipeline
-        from kambo.models import Phase as P
         pipeline = get_pipeline()
-        targets = pipeline.targets_for_phase(P(args["phase"]))
+        targets = pipeline.targets_for_phase(Phase(args["phase"]))
         return {"phase": args["phase"], "targets": targets, "count": len(targets)}
     if name == "pipeline_reset":
         reset_pipeline()

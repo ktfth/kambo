@@ -11,7 +11,12 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
 ]
 dependencies = [
-    "mcp[cli]>=1.0.0",
+    # Pinned below 2.0: the 2.x SDK dropped the low-level decorator API
+    # (@server.list_tools/call_tool/list_resources/read_resource/
+    # list_prompts/get_prompt) that kambo.server is wired against, and
+    # replaced it with on_*= constructor callbacks. Lifting this pin
+    # requires porting server.py first — see tests/test_mcp_contract.py.
+    "mcp[cli]>=1.0.0,<2",
     "docker>=7.0.0",
     "pydantic>=2.0.0",
     "pydantic-settings>=2.0.0",
